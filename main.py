@@ -14,7 +14,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Firebase Studio 프론트엔드 CORS 허용
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,17 +21,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── 헬스체크 ───────────────────────────────────────────────────
 @app.get("/")
 def health_check():
     return {"status": "ok"}
 
-# ── 전체 종목 스냅샷 ───────────────────────────────────────────
 @app.get("/trends")
 def all_trends():
     return JSONResponse(engine.get_snapshot())
 
-# ── 카테고리별 필터 ────────────────────────────────────────────
 @app.get("/trends/category/{category}")
 def by_category(category: str):
     snap = engine.get_snapshot()
@@ -41,7 +37,6 @@ def by_category(category: str):
         return JSONResponse({"error": "카테고리 없음"}, status_code=404)
     return JSONResponse(filtered)
 
-# ── 종목 단건 조회 ─────────────────────────────────────────────
 @app.get("/trends/{ticker}")
 def one_trend(ticker: str):
     snap = engine.get_snapshot()
@@ -49,6 +44,5 @@ def one_trend(ticker: str):
         return JSONResponse({"error": "종목 없음"}, status_code=404)
     return JSONResponse(snap[ticker])
 
-# ── 서버 직접 실행 ─────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8080)
