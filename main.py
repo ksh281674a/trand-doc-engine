@@ -1,135 +1,167 @@
 import time
 import random
 import numpy as np
-from datetime import datetime, timedelta
+import warnings
 import pytz
+from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
+from pytrends.request import TrendReq
 from apscheduler.schedulers.background import BackgroundScheduler
 import firebase_admin
 from firebase_admin import credentials, db
 
-# --- [1] 초기 설정 및 Firebase 연결 ---
-# Cloudtype 환경에서는 serviceAccountKey.json 파일이 프로젝트 루트에 있어야 합니다.
+# --- [1] 기본 설정 ---
+warnings.filterwarnings('ignore')
+KST = pytz.timezone('Asia/Seoul')
+app = Flask(__name__)
+
+# Cloudtype 상태 확인용
+@app.route('/')
+def home():
+    return f"TrendDoc Engine Active - {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}"
+
+# Firebase 연결 (실제 본인의 URL과 JSON 키 파일 확인 필수)
 try:
-    cred = credentials.Certificate('serviceAccountKey.json')
+    cred = credentials.Certificate('service_account.json')
     firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://your-project-id.firebaseio.com/'
+        'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
     })
 except Exception as e:
-    print(f"Firebase 연결 정보를 확인해주세요 (현재 로컬 모드): {e}")
+    print(f"⚠️ Firebase 초기화 건너뜀 (로컬 실행용): {e}")
 
-KST = pytz.timezone('Asia/Seoul')
-STOCKS = [f"종목_{i:02d}" for i in range(1, 35)] # 총 34개 종목
+# 종목 리스트 (실제 검색어로 변경 가능)
+STOCKS = [
+    "Nvidia", "Apple", "Tesla", "Microsoft", "Google", 
+    "Amazon", "Meta", "Netflix", "AMD", "Intel"
+    # ... 총 34개를 채우시면 됩니다.
+] + [f"Stock_{i}" for i in range(11, 35)]
+
 stock_states = {}
-
-# 모든 종목의 초기 기본 점수를 60점으로 설정
 for ticker in STOCKS:
     stock_states[ticker] = {
-        "base_score": 60.0,    # 기준 점수 (전날 종가 또는 초기 60점)
-        "current_pct": 0.0,    # 현재 변동률 (%) - 하루 시작은 항상 0%
-        "target_pct": 0.0,     # 트렌드 점수 기반 목표 변동률 (%)
-        "remaining_sec": 420,  # 7분(420초) 수렴 타이머
-        "rev_left": 0,         # 남은 반전 횟수 (0~5회)
-        "direction": 1,        # 현재 모멘텀 방향
-        "volatility": 0.05     # 변동성 계수
+        "base_score": 60.0,    # 어제 종가 기준 (초기 60)
+        "current_pct": 0.0,    # 당일 변동률
+        "target_pct": 0.0,     # 구글 트렌드 목표 변동률
+        "remaining_sec": 420,  # 7분 수렴 타이머
+        "rev_left": 0,         # 남은 반전 횟수
+        "direction": 1,        # 모멘텀 방향
+        "volatility": 0.05     # 현재 변동성
     }
 
-# --- [2] 4가지 핵심 엔진 로직 (수렴 및 변동) ---
-def calculate_next_tick(ticker):
+# --- [2] 4대 물리 엔진 (가우시안, 모멘텀, 클러스터링, 회귀) ---
+def calculate_tick(ticker):
     s = stock_states[ticker]
     rem = s["remaining_sec"]
     
     if rem <= 0:
-        # 7분 종료 시: 목표치 근처 +-0.15% 랜덤 수렴
+        # 7분 종료: 목표치 근처 +-0.15% 수렴
         s["current_pct"] = s["target_pct"] + random.uniform(-0.15, 0.15)
     else:
-        # 1. 수렴 동력 (Drift): 남은 시간 동안 목표치로 유도
+        # 1. 수렴 동력 (Drift)
         drift = (s["target_pct"] - s["current_pct"]) / (rem + 1)
 
-        # 2. 가우시안 노이즈: 미세한 틱 떨림
-        noise = np.random.normal(0, 0.015)
+        # 2. 가우시안 노이즈 (미세 떨림)
+        noise = np.random.normal(0, s["volatility"])
 
-        # 3. 모멘텀 및 반전 시스템: 설정된 횟수만큼 방향 전환
+        # 3. 모멘텀 시스템 (반전 포인트)
         if s["rev_left"] > 0 and random.random() < (s["rev_left"] / rem):
             s["direction"] *= -1
             s["rev_left"] -= 1
         momentum = s["direction"] * (abs(s["target_pct"]) * 0.005 + 0.005)
 
-        # 4. 변동성 클러스터링 및 평균 회귀
+        # 4. 변동성 클러스터링 & 평균 회귀
         delta = drift + noise + momentum
+        
+        # 급등락 시 변동성 일시 증가 (클러스터링)
+        if abs(delta) > 0.1: s["volatility"] *= 1.1
+        else: s["volatility"] *= 0.99
+        s["volatility"] = clip(s["volatility"], 0.01, 0.2)
+
         s["current_pct"] += delta
         s["remaining_sec"] -= 1
 
-    # 최종 점수 계산: 기준 점수 * (1 + 현재 변동률 / 100)
     final_score = s["base_score"] * (1 + s["current_pct"] / 100)
     return round(final_score, 2), round(s["current_pct"], 2)
 
-# --- [3] 데이터 수집 및 로그 출력 ---
-def update_stock_batch(batch_num):
+def clip(n, smallest, largest):
+    return max(smallest, min(n, largest))
+
+# --- [3] 구글 트렌드 실시간 수집 (Pytrends) ---
+def fetch_trends_batch(batch_num):
     start_idx = batch_num * 5
     end_idx = min(start_idx + 5, len(STOCKS))
-    current_batch = STOCKS[start_idx:end_idx]
+    subset = STOCKS[start_idx:end_idx]
     
+    pytrends = TrendReq(hl='ko-KR', tz=540)
     now_str = datetime.now(KST).strftime('%H:%M:%S')
-    print(f"\n[{now_str}] 🚀 {batch_num+1}번 배수 종목 수집 시작 (5개)")
-    print("-" * 65)
-
-    for ticker in current_batch:
-        # 트렌드 점수 1점 = 0.5% (예: 12점 = 6%)
-        trend_score = random.randint(1, 20)
-        new_target_pct = trend_score * 0.5
+    
+    print(f"\n[{now_str}] 🔍 구글 수집 시작 (Batch {batch_num+1}/7): {', '.join(subset)}")
+    
+    try:
+        pytrends.build_payload(subset, timeframe='now 1-H', geo='KR')
+        df = pytrends.interest_over_time()
         
-        # 현재 점수 대비 목표까지 이동해야 할 거리 계산
-        current_score = stock_states[ticker]["base_score"] * (1 + stock_states[ticker]["current_pct"] / 100)
-        target_score = stock_states[ticker]["base_score"] * (1 + new_target_pct / 100)
-        score_diff = target_score - current_score
-        
-        # 상태 갱신
-        stock_states[ticker].update({
-            "target_pct": new_target_pct,
-            "remaining_sec": 420,
-            "rev_left": random.randint(0, 5),
-            "direction": 1 if new_target_pct > stock_states[ticker]["current_pct"] else -1
-        })
+        for ticker in subset:
+            # 트렌드 값(0~100) 가져오기, 실패 시 랜덤 보정
+            val = int(df[ticker].iloc[-1]) if not df.empty and ticker in df.columns else random.randint(40, 80)
+            
+            # 1점 = 0.5% 변동률 목표 설정
+            target_pct = (val - 60) * 0.5  # 60점 기준 위아래 변동
+            
+            stock_states[ticker].update({
+                "target_pct": target_pct,
+                "remaining_sec": 420,
+                "rev_left": random.randint(0, 5),
+                "direction": 1 if target_pct > stock_states[ticker]["current_pct"] else -1
+            })
+            
+            print(f"  ✅ [수집완료] {ticker:10} | 트렌드: {val:2}점 | 목표수익률: {target_pct:>5.1f}%")
+            
+    except Exception as e:
+        print(f"  ⚠️ [수집실패] {subset} 에러: {e}")
 
-        # Cloudtype 로그 출력
-        status = "▲ 상승" if score_diff > 0 else "▼ 하락"
-        print(f"  [수집완료] {ticker:7} | 트렌드: {trend_score:2}점 | 목표: {target_score:>6.2f}점 ({status} {abs(score_diff):>5.2f}점 이동)")
-    print("-" * 65)
-
-# --- [4] 자정 리셋 로직 (KST 00:00) ---
+# --- [4] 자정 리셋 및 스케줄러 ---
 def daily_reset():
-    now = datetime.now(KST)
-    print(f"\n[{now.strftime('%Y-%m-%d')}] 🕒 자정 리셋: 전날 마지막 데이터를 기준 점수로 덮어씀")
+    print(f"\n[{datetime.now(KST).date()}] 🕒 자정 리셋: 전날 종가 덮어쓰기")
     for ticker in STOCKS:
-        # 현재 점수를 계산하여 다음 날의 base_score로 설정
-        final_score_today = stock_states[ticker]["base_score"] * (1 + stock_states[ticker]["current_pct"] / 100)
-        stock_states[ticker]["base_score"] = final_score_today
-        stock_states[ticker]["current_pct"] = 0.0 # 변동률은 0%로 초기화
+        final_score, _ = calculate_tick(ticker)
+        stock_states[ticker]["base_score"] = final_score
+        stock_states[ticker]["current_pct"] = 0.0
         stock_states[ticker]["target_pct"] = 0.0
 
-# --- [5] 스케줄러 설정 ---
 scheduler = BackgroundScheduler(timezone=KST)
-
-# 20:10:30부터 1분 간격으로 7번 배치 수집 (총 34개 종목 완료)
+# 매일 20:10:30부터 1분 간격으로 7번 배치 실행
 for i in range(7):
-    scheduler.add_job(update_stock_batch, 'cron', hour=20, minute=10+i, second=30, args=[i])
+    scheduler.add_job(fetch_trends_batch, 'cron', hour=20, minute=10+i, second=30, args=[i])
 
 # 매일 자정 리셋
 scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
 scheduler.start()
 
-# --- [6] 실시간 메인 루프 ---
-print("✅ 주가 시뮬레이션 서버 가동 중... (기본 점수: 60점)")
-try:
+# --- [5] 실시간 데이터 전송 루프 ---
+def physics_loop():
+    print("🚀 물리 시뮬레이션 엔진 가동...")
     while True:
         updates = {}
         for ticker in STOCKS:
-            current_score, current_pct = calculate_next_tick(ticker)
-            # Firebase 업데이트 경로 설정
-            updates[f"stocks/{ticker}/score"] = current_score
-            updates[f"stocks/{ticker}/change_pct"] = current_pct
+            score, pct = calculate_tick(ticker)
+            updates[f"live/{ticker}"] = {
+                "score": score,
+                "pct": pct,
+                "target": stock_states[ticker]["target_pct"]
+            }
         
-        # db.reference().update(updates) # 실사용 시 주석 해제
+        # Firebase 일괄 업데이트 (네트워크 효율을 위해 1초마다)
+        try:
+            db.reference('realtime_stocks').update(updates)
+        except:
+            pass
         time.sleep(1)
-except (KeyboardInterrupt, SystemExit):
-    scheduler.shutdown()
+
+if __name__ == "__main__":
+    # 1. Flask 서버 (Cloudtype용 포트 8080)
+    Thread(target=lambda: app.run(host='0.0.0.0', port=8080, use_reloader=False)).start()
+    
+    # 2. 물리 엔진 루프
+    physics_loop()
