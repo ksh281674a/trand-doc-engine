@@ -10,18 +10,18 @@ from collections import deque
 from flask import Flask
 from pytrends.request import TrendReq
 
-# --- 설정 ---
+# --- 1. 로그 및 환경 설정 ---
 warnings.filterwarnings('ignore')
 KST = timezone(timedelta(hours=9))
 app = Flask(__name__)
 
 def log(msg):
-    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] {msg}", flush=True)
-    sys.stdout.flush()
+    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] {msg}", file=sys.stdout, flush=True)
 
 @app.route('/')
-def home(): return "TrendDoc Anti-Block Engine V50.3"
+def home(): return "TrendDoc Stealth Engine V50.5 Active"
 
+# --- 2. 데이터 경로 ---
 FIREBASE_LIVE_URL = "https://trand-doc-default-rtdb.firebaseio.com/live_data.json"
 FIREBASE_CHART_URL = "https://trand-doc-default-rtdb.firebaseio.com/chart_history"
 
@@ -54,7 +54,7 @@ def snap_to_tick(price):
     elif price >= 50000: return int(round(price / 50) * 50)
     else: return int(round(price / 10) * 10)
 
-# 물리 엔진 (백그라운드 처리, 로그 없음)
+# --- 3. 물리 엔진 (백그라운드) ---
 def physics_engine():
     global lock_engine, current_candle_time
     while True:
@@ -68,16 +68,14 @@ def physics_engine():
             elapsed = now_ts - s["last_update_ts"]
             time_left = max(1.0, 420.0 - elapsed)
             
-            # 모멘텀 반전
-            if random.random() < (s["reversal_count"] / 840.0): s["momentum_dir"] *= -1
-            
+            # 가우시안 노이즈 및 모멘텀 (1~4번 법칙)
             dist = s["target_p"] - s["curr_p"]
             gravity = dist / time_left
             noise = np.random.normal(0, s["base_p"] * s["volatility"])
-            
             s["velocity"] = (s["velocity"] * 0.85) + (gravity * 0.15) + (noise * s["momentum_dir"])
             s["curr_p"] += s["velocity"]
             
+            # 수렴 보정
             if time_left < 5: s["curr_p"] = s["target_p"] * random.uniform(0.9985, 1.0015)
             
             dp = snap_to_tick(s["curr_p"])
@@ -92,34 +90,33 @@ def physics_engine():
         except: pass
         time.sleep(0.5)
 
+# --- 4. 스텔스 수집 엔진 ---
 def clock_master():
-    log("🚀 수집 방어 강화 엔진 가동")
+    log("🚀 [엔진 시작] 스텔스 수집 모드 가동")
     
     UA_LIST = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15) Safari/605.1.15",
-        "Mozilla/5.0 (X11; Linux x86_64) Firefox/123.0"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     ]
 
     while True:
         now = datetime.now(KST)
-        # 매분 35초에 작업 시작 (구글 봇 탐지 회피용 지연)
-        wait_sec = (60 - now.second) + 35
+        # 매분 30초 대기
+        wait_sec = (60 - now.second) + 30
         if wait_sec > 60: wait_sec -= 60
         time.sleep(wait_sec)
         
         global lock_engine, current_candle_time
         lock_engine = True
         
-        # 자정 리셋
+        # 자정 기준가 리셋
         if now.hour == 0 and now.minute == 0:
-            for name in stock_names:
-                data_map[name]["base_p"] = data_map[name]["curr_p"]
-                data_map[name]["open"] = data_map[name]["high"] = data_map[name]["low"] = data_map[name]["curr_p"]
+            for name in stock_names: data_map[name]["base_p"] = data_map[name]["curr_p"]
 
         prev_ts = current_candle_time
         current_candle_time = (int(time.time()) // 60) * 60
         
+        # 차트 기록
         history_batch = {}
         for name in stock_names:
             s = data_map[name]
@@ -129,38 +126,44 @@ def clock_master():
             s["open"] = s["high"] = s["low"] = float(snap_to_tick(s["curr_p"]))
         Thread(target=lambda: requests.patch(f"{FIREBASE_CHART_URL}.json", json=history_batch)).start()
 
+        # 5개 종목 수집
         subset = [stock_queue.popleft() for _ in range(5)]
         stock_queue.extend(subset)
-
-        # 수집 시도 (세션 초기화 포함)
-        success = False
+        
+        log(f"🔔 [수집 시도] 대상: {', '.join(subset)}")
+        
         try:
-            # 매번 새로운 세션 할당
-            pytrends = TrendReq(hl='ko-KR', tz=540, requests_args={'headers': {'User-Agent': random.choice(UA_LIST)}, 'timeout': 20})
+            # 1단계: 세션 및 헤더 세팅
+            headers = {
+                'User-Agent': random.choice(UA_LIST),
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': 'https://trends.google.co.kr/trends/'
+            }
+            
+            # 2단계: 수동 지연 후 수집
+            time.sleep(random.uniform(5, 15)) # 5~15초 랜덤 지연으로 봇 감지 회피
+            pytrends = TrendReq(hl='ko-KR', tz=540, requests_args={'headers': headers, 'timeout': 30})
             pytrends.build_payload(subset, timeframe='now 1-H', geo='KR')
             df = pytrends.interest_over_time()
             
             if not df.empty:
-                log(f"🔔 [정각 수집] 대상: {', '.join(subset)}")
                 for name in subset:
                     val = int(df[name].iloc[-1]) if name in df.columns else random.randint(58, 62)
-                    target_ratio = (val - 60) * 0.005
+                    target_ratio = (val - 60) * 0.005 # 1점 = 0.5%
                     s = data_map[name]
                     s["target_p"] = s["base_p"] * (1 + target_ratio)
                     s["last_update_ts"] = time.time()
-                    s["reversal_count"] = random.randint(0, 5)
-                    log(f"   ㄴ {name}: 목표 변동 {target_ratio*100:+.2f}%")
-                success = True
-        except: pass
-        
-        if not success:
-            log(f"⚠️ 구글 수집 지연 (임의 보정 실행)")
+                    log(f"   ㄴ {name}: 점수 {val} -> 목표 {target_ratio*100:+.2f}% 설정")
+            else:
+                raise Exception("Empty Data")
+                
+        except Exception as e:
+            log(f"   ❌ [수집 실패] 구글 차단 감지 - 임의 보정 작동")
             for name in subset:
-                target_ratio = random.uniform(-0.015, 0.015)
                 s = data_map[name]
-                s["target_p"] = s["base_p"] * (1 + target_ratio)
+                s["target_p"] = s["base_p"] * (1 + random.uniform(-0.02, 0.02))
                 s["last_update_ts"] = time.time()
-                log(f"   ㄴ {name}: 보정 목표 {target_ratio*100:+.2f}%")
+                log(f"   ㄴ {name}: 보정 목표 {((s['target_p']/s['base_p'])-1)*100:+.2f}%")
         
         lock_engine = False
 
