@@ -1,4 +1,6 @@
-fastapi
-uvicorn[standard]
-pytz
+flask
 pytrends
+gspread
+firebase-admin
+apscheduler
+pandas
