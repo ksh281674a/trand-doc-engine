@@ -15,12 +15,13 @@ warnings.filterwarnings('ignore')
 KST = timezone(timedelta(hours=9))
 app = Flask(__name__)
 
+# 로그 출력 함수 (즉시 출력용)
 def log(msg):
     print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] {msg}", flush=True)
     sys.stdout.flush()
 
 @app.route('/')
-def home(): return "TrendDoc Engine V40.11 Ultra Active"
+def home(): return "TrendDoc Engine V40.13 Stable"
 
 FIREBASE_LIVE_URL = "https://trand-doc-default-rtdb.firebaseio.com/live_data.json"
 FIREBASE_CHART_URL = "https://trand-doc-default-rtdb.firebaseio.com/chart_history"
@@ -54,6 +55,7 @@ def snap_to_tick(price):
     elif price >= 50000: return int(round(price / 50) * 50)
     else: return int(round(price / 10) * 10)
 
+# 물리 엔진 (실시간 로그 삭제됨)
 def physics_engine():
     global lock_engine, current_candle_time
     while True:
@@ -81,17 +83,11 @@ def physics_engine():
         except: pass
         time.sleep(0.5)
 
+# 수집 엔진 (에러 수정 및 로그 집중)
 def clock_master():
     global lock_engine, current_candle_time
-    log("🚀 Ultra-Stable 엔진 가동!")
+    log("🚀 TrendDoc 엔진 가동 시작 (수집 모드)")
     
-    # 다양한 브라우저 정보 (랜덤 선택용)
-    UA_LIST = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
-    ]
-
     while True:
         now = datetime.now()
         wait = 60 - now.second - (now.microsecond / 1000000.0)
@@ -101,7 +97,7 @@ def clock_master():
         prev_ts = current_candle_time
         current_candle_time = (int(time.time()) // 60) * 60
         
-        # 봉 교체
+        # 봉 데이터 히스토리 저장 및 리셋
         history_batch = {}
         reset_live = {}
         for name in stock_names:
@@ -116,43 +112,43 @@ def clock_master():
         requests.patch(FIREBASE_LIVE_URL, json=reset_live)
         Thread(target=lambda: requests.patch(f"{FIREBASE_CHART_URL}.json", json=history_batch)).start()
 
+        # 수집할 5개 종목 선정
         subset = [stock_queue.popleft() for _ in range(5)]
         stock_queue.extend(subset)
         
-        # 수집 시도 (실패 최소화 로직)
-        success = False
         try:
-            # 1단계: 정각에서 5~15초 랜덤 지연 (봇 방지 핵심)
-            time.sleep(random.uniform(5.0, 15.0))
+            # [수정] method_whitelist 에러 방지를 위해 인자 없이 세션 생성
+            pytrends = TrendReq(hl='ko-KR', tz=540) 
             
-            # 2단계: 매번 새로운 세션과 헤더 생성
-            pytrends = TrendReq(hl='ko-KR', tz=540, requests_args={'headers': {'User-Agent': random.choice(UA_LIST)}})
-            
+            time.sleep(random.uniform(3, 8)) # 차단 방지용 랜덤 딜레이
             pytrends.build_payload(subset, timeframe='now 1-H', geo='KR')
             df = pytrends.interest_over_time()
             
-            if not df.empty:
-                for name in subset:
-                    val = int(df[name].iloc[-1]) if name in df.columns else random.randint(55, 65)
-                    if val == 0: val = random.randint(55, 65)
-                    
-                    drift_pct = (val - 60) * 0.005
-                    data_map[name]["target_p"] = data_map[name]["base_p"] * (1 + drift_pct)
-                    data_map[name]["last_update_ts"] = time.time()
-                    log(f"   ㄴ {name}: 목표 변동 {drift_pct*100:+.2f}%")
-                success = True
-        except:
-            pass
-
-        # 3단계: 만약 실패했다면 즉시 2차 예비 수집 (지수 기반 보정)
-        if not success:
+            # 수집 결과 로그 출력
+            log(f"📍 업데이트 정보 ({', '.join(subset)})")
+            
             for name in subset:
-                # 수집 실패 시 이전 움직임의 관성을 따르거나 보합 유지
-                fake_val = random.randint(58, 62)
-                drift_pct = (fake_val - 60) * 0.005
+                # 데이터 수집 성공 여부에 따른 점수 결정
+                val = int(df[name].iloc[-1]) if (not df.empty and name in df.columns) else random.randint(58, 62)
+                if val == 0: val = random.randint(58, 62) # 0점 방어
+                
+                # 변동 목표 계산 (60점 기준)
+                drift_pct = (val - 60) * 0.005
                 data_map[name]["target_p"] = data_map[name]["base_p"] * (1 + drift_pct)
                 data_map[name]["last_update_ts"] = time.time()
-                log(f"   ㄴ {name}: 목표 변동 {drift_pct*100:+.2f}% (안전 보정)")
+                
+                # 종목별 목표 변동치 로그 (요청 사항)
+                log(f"   ㄴ {name}: 목표 변동 {drift_pct*100:+.2f}% 설정됨")
+                
+        except Exception as e:
+            # 수집 실패 시에도 목표치를 자동 생성하여 엔진 유지
+            log(f"⚠️ 구글 응답 지연으로 자동 보정 수행 ({', '.join(subset)})")
+            for name in subset:
+                val = random.randint(58, 62)
+                drift_pct = (val - 60) * 0.005
+                data_map[name]["target_p"] = data_map[name]["base_p"] * (1 + drift_pct)
+                data_map[name]["last_update_ts"] = time.time()
+                log(f"   ㄴ {name}: 목표 변동 {drift_pct*100:+.2f}% (자동)")
             
         lock_engine = False
 
