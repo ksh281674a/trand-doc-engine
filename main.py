@@ -20,7 +20,7 @@ def log(msg):
     sys.stdout.flush()
 
 @app.route('/')
-def home(): return "TrendDoc Ultra-Stable Engine V50.2"
+def home(): return "TrendDoc Anti-Block Engine V50.3"
 
 FIREBASE_LIVE_URL = "https://trand-doc-default-rtdb.firebaseio.com/live_data.json"
 FIREBASE_CHART_URL = "https://trand-doc-default-rtdb.firebaseio.com/chart_history"
@@ -54,6 +54,7 @@ def snap_to_tick(price):
     elif price >= 50000: return int(round(price / 50) * 50)
     else: return int(round(price / 10) * 10)
 
+# 물리 엔진 (백그라운드 처리, 로그 없음)
 def physics_engine():
     global lock_engine, current_candle_time
     while True:
@@ -67,18 +68,17 @@ def physics_engine():
             elapsed = now_ts - s["last_update_ts"]
             time_left = max(1.0, 420.0 - elapsed)
             
-            if random.random() < (s["reversal_count"] / 840.0): 
-                s["momentum_dir"] *= -1
+            # 모멘텀 반전
+            if random.random() < (s["reversal_count"] / 840.0): s["momentum_dir"] *= -1
             
-            dist_to_target = s["target_p"] - s["curr_p"]
-            gravity = dist_to_target / time_left
+            dist = s["target_p"] - s["curr_p"]
+            gravity = dist / time_left
             noise = np.random.normal(0, s["base_p"] * s["volatility"])
             
             s["velocity"] = (s["velocity"] * 0.85) + (gravity * 0.15) + (noise * s["momentum_dir"])
             s["curr_p"] += s["velocity"]
             
-            if time_left < 5:
-                s["curr_p"] = s["target_p"] * random.uniform(0.9985, 1.0015)
+            if time_left < 5: s["curr_p"] = s["target_p"] * random.uniform(0.9985, 1.0015)
             
             dp = snap_to_tick(s["curr_p"])
             if dp > s["high"]: s["high"] = dp
@@ -93,29 +93,29 @@ def physics_engine():
         time.sleep(0.5)
 
 def clock_master():
-    global lock_engine, current_candle_time
-    log("🚀 수집 강화 엔진 가동")
+    log("🚀 수집 방어 강화 엔진 가동")
     
     UA_LIST = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/121.0.0.0",
-        "Mozilla/5.0 (X11; Linux x86_64) Firefox/122.0"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15) Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) Firefox/123.0"
     ]
 
     while True:
         now = datetime.now(KST)
-        wait_sec = (60 - now.second) + 30 # 정각 30초 전 대기
+        # 매분 35초에 작업 시작 (구글 봇 탐지 회피용 지연)
+        wait_sec = (60 - now.second) + 35
         if wait_sec > 60: wait_sec -= 60
         time.sleep(wait_sec)
         
+        global lock_engine, current_candle_time
         lock_engine = True
         
+        # 자정 리셋
         if now.hour == 0 and now.minute == 0:
             for name in stock_names:
                 data_map[name]["base_p"] = data_map[name]["curr_p"]
-                data_map[name]["open"] = data_map[name]["curr_p"]
-                data_map[name]["high"] = data_map[name]["curr_p"]
-                data_map[name]["low"] = data_map[name]["curr_p"]
+                data_map[name]["open"] = data_map[name]["high"] = data_map[name]["low"] = data_map[name]["curr_p"]
 
         prev_ts = current_candle_time
         current_candle_time = (int(time.time()) // 60) * 60
@@ -131,34 +131,32 @@ def clock_master():
 
         subset = [stock_queue.popleft() for _ in range(5)]
         stock_queue.extend(subset)
-        log(f"📍 [업데이트 대상] {', '.join(subset)}")
 
-        # --- 지능형 수집 로직 시작 ---
+        # 수집 시도 (세션 초기화 포함)
         success = False
-        for attempt in range(3): # 최대 3번 시도
-            try:
-                time.sleep(random.uniform(5, 10) * (attempt + 1)) # 시도할수록 지연시간 증가
-                pytrends = TrendReq(hl='ko-KR', tz=540, requests_args={'headers': {'User-Agent': random.choice(UA_LIST)}})
-                pytrends.build_payload(subset, timeframe='now 1-H', geo='KR')
-                df = pytrends.interest_over_time()
-                
-                if not df.empty:
-                    for name in subset:
-                        val = int(df[name].iloc[-1]) if name in df.columns else random.randint(58, 62)
-                        target_ratio = (val - 60) * 0.005
-                        s = data_map[name]
-                        s["target_p"] = s["base_p"] * (1 + target_ratio)
-                        s["last_update_ts"] = time.time()
-                        log(f"   ㄴ {name}: 현재 목표 {target_ratio*100:+.2f}%")
-                    success = True
-                    break
-            except Exception as e:
-                log(f"   ⚠️ {attempt+1}차 시도 실패, 재시도 중...")
+        try:
+            # 매번 새로운 세션 할당
+            pytrends = TrendReq(hl='ko-KR', tz=540, requests_args={'headers': {'User-Agent': random.choice(UA_LIST)}, 'timeout': 20})
+            pytrends.build_payload(subset, timeframe='now 1-H', geo='KR')
+            df = pytrends.interest_over_time()
+            
+            if not df.empty:
+                log(f"🔔 [정각 수집] 대상: {', '.join(subset)}")
+                for name in subset:
+                    val = int(df[name].iloc[-1]) if name in df.columns else random.randint(58, 62)
+                    target_ratio = (val - 60) * 0.005
+                    s = data_map[name]
+                    s["target_p"] = s["base_p"] * (1 + target_ratio)
+                    s["last_update_ts"] = time.time()
+                    s["reversal_count"] = random.randint(0, 5)
+                    log(f"   ㄴ {name}: 목표 변동 {target_ratio*100:+.2f}%")
+                success = True
+        except: pass
         
         if not success:
-            log("   ❌ 모든 수집 시도 실패 (자동 보정 모드 전환)")
+            log(f"⚠️ 구글 수집 지연 (임의 보정 실행)")
             for name in subset:
-                target_ratio = random.uniform(-0.02, 0.02)
+                target_ratio = random.uniform(-0.015, 0.015)
                 s = data_map[name]
                 s["target_p"] = s["base_p"] * (1 + target_ratio)
                 s["last_update_ts"] = time.time()
