@@ -1,5 +1,5 @@
-flask==3.0.2
-requests==2.31.0
-numpy==1.26.4
-pytrends==4.9.2
-urllib3==1.26.18
+urllib3==1.26.15
+firebase-admin
+apscheduler
+numpy
+pytz
