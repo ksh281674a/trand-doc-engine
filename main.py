@@ -5,7 +5,7 @@ import random
 import numpy as np
 from datetime import datetime
 import pytz
-from pytrends.request import TrendReq
+from pytrends_modern import TrendReq
 import firebase_admin
 from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -110,10 +110,9 @@ def initialize_app():
                 'current_yield': 0.0
             })
     print("✅ 모든 데이터 연결 완료!")
-    fetch_and_update()  # 시작하자마자 바로 수집
 
 # ---------------------------------------------------------
-# 4. 스케줄러
+# 4. 스케줄러 (매시 00분, 30분 정각에 수집)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 scheduler.add_job(
