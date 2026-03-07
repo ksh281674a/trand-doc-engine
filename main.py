@@ -1,6 +1,7 @@
 import time
 import os
 import json
+import itertools
 import numpy as np
 from datetime import datetime
 from pytrends.request import TrendReq
@@ -36,6 +37,9 @@ TICKERS_DATA = {
     "YG": 35, "JYP": 32
 }
 
+# 중복 없이 순환하는 종목 이터레이터
+ticker_cycle = itertools.cycle(list(TICKERS_DATA.keys()))
+
 # ---------------------------------------------------------
 # 3. 실시간 알고리즘
 # ---------------------------------------------------------
@@ -67,9 +71,13 @@ def daily_midnight_reset():
         })
 
 def fetch_and_update():
+    # 1분마다 5개씩 순환 (중복 없이, 7분이면 34개 전체 완료)
+    batch = [next(ticker_cycle) for _ in range(5)]
+
     now = datetime.now()
-    print(f"\n📊 [수집 시작] {now.strftime('%H:%M:%S')}")
-    for ticker in TICKERS_DATA.keys():
+    print(f"\n📊 [수집 시작] {now.strftime('%H:%M:%S')} → {', '.join(batch)}")
+
+    for ticker in batch:
         try:
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
@@ -80,7 +88,7 @@ def fetch_and_update():
             target_yield = (current_score - baseline) * 0.5
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield:+.2f}%")
-            time.sleep(12)
+            time.sleep(10)  # 5개 × 10초 = 50초 (1분 안에 완료)
         except Exception as e:
             print(f" ❌ {ticker} 오류: {e}")
 
@@ -101,7 +109,7 @@ def initialize_app():
 # 4. 스케줄러
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-scheduler.add_job(fetch_and_update, 'cron', minute='*/7')
+scheduler.add_job(fetch_and_update, 'cron', minute='*/1')  # 1분마다 5개씩
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
