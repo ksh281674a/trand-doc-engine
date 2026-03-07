@@ -1,8 +1,8 @@
 import time
 import os
 import json
+import random
 import itertools
-import threading
 import numpy as np
 from datetime import datetime
 from pytrends.request import TrendReq
@@ -69,31 +69,27 @@ def daily_midnight_reset():
             'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
         })
 
-def fetch_single(ticker):
-    """종목 1개 수집 (스레드용)"""
-    try:
-        ref = db.reference(f'trends/{ticker}')
-        data = ref.get()
-        baseline = data.get('baseline', TICKERS_DATA[ticker])
-        pt = TrendReq(hl='ko-KR', tz=540)  # 스레드마다 별도 인스턴스
-        pt.build_payload([ticker], timeframe='now 1-H')
-        df = pt.interest_over_time()
-        current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
-        target_yield = (current_score - baseline) * 0.5
-        ref.update({'last_score': current_score, 'target_yield': target_yield})
-        print(f" ✅ {ticker}: {target_yield:+.2f}%")
-    except Exception as e:
-        print(f" ❌ {ticker} 오류: {e}")
-
 def fetch_and_update():
-    # 매분 00초에 5개 동시 수집
     batch = [next(ticker_cycle) for _ in range(5)]
     now = datetime.now()
     print(f"\n📊 [수집 시작] {now.strftime('%H:%M:%S')} → {', '.join(batch)}")
 
-    threads = [threading.Thread(target=fetch_single, args=(t,)) for t in batch]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for ticker in batch:
+        try:
+            ref = db.reference(f'trends/{ticker}')
+            data = ref.get()
+            baseline = data.get('baseline', TICKERS_DATA[ticker])
+            pt = TrendReq(hl='ko-KR', tz=540)
+            pt.build_payload([ticker], timeframe='now 1-H')
+            df = pt.interest_over_time()
+            current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
+            target_yield = (current_score - baseline) * 0.5
+            ref.update({'last_score': current_score, 'target_yield': target_yield})
+            print(f" ✅ {ticker}: {target_yield:+.2f}%")
+        except Exception as e:
+            print(f" ❌ {ticker} 오류: {e}")
+        finally:
+            time.sleep(random.uniform(5, 10))  # 5~10초 랜덤 대기
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
@@ -112,7 +108,7 @@ def initialize_app():
 # 4. 스케줄러
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-scheduler.add_job(fetch_and_update, 'cron', minute='*/1', second=0)  # 매분 00초에 5개 동시
+scheduler.add_job(fetch_and_update, 'cron', minute='*/1', second=0)
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
