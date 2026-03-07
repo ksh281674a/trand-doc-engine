@@ -4,6 +4,7 @@ import json
 import random
 import numpy as np
 from datetime import datetime
+import pytz
 from pytrends.request import TrendReq
 import firebase_admin
 from firebase_admin import credentials, db
@@ -11,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 
 app = Flask(__name__)
+KST = pytz.timezone('Asia/Seoul')
 
 # ---------------------------------------------------------
 # 1. Firebase 인증
@@ -66,7 +68,7 @@ def daily_midnight_reset():
         })
 
 def fetch_and_update():
-    now = datetime.now()
+    now = datetime.now(KST)  # 한국 시간
     print(f"\n📊 [전체 수집 시작] {now.strftime('%H:%M:%S')}")
 
     for ticker in TICKERS_DATA.keys():
@@ -74,17 +76,29 @@ def fetch_and_update():
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
             baseline = data.get('baseline', TICKERS_DATA[ticker])
-            pt = TrendReq(hl='ko-KR', tz=540)
+            pt = TrendReq(
+                hl='ko-KR',
+                tz=540,
+                retries=3,
+                backoff_factor=2.0,
+                requests_args={
+                    'headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                }
+            )
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
             target_yield = (current_score - baseline) * 0.5
             ref.update({'last_score': current_score, 'target_yield': target_yield})
-            print(f" ✅ {ticker}: {target_yield:+.2f}%")
+            now_log = datetime.now(KST)
+            print(f" ✅ [{now_log.strftime('%H:%M:%S')}] {ticker}: {target_yield:+.2f}%")
         except Exception as e:
-            print(f" ❌ {ticker} 오류: {e}")
+            now_log = datetime.now(KST)
+            print(f" ❌ [{now_log.strftime('%H:%M:%S')}] {ticker} 오류: {e}")
         finally:
-            time.sleep(random.uniform(50, 56))  # 평균 53초 × 34개 = 약 30분
+            time.sleep(random.uniform(50, 56))
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
@@ -98,6 +112,7 @@ def initialize_app():
                 'current_yield': 0.0
             })
     print("✅ 모든 데이터 연결 완료!")
+    fetch_and_update()  # 시작하자마자 바로 수집
 
 # ---------------------------------------------------------
 # 4. 스케줄러
@@ -106,7 +121,7 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 scheduler.add_job(
     fetch_and_update,
     'cron',
-    minute=0,        # 정각 (0분, 30분)
+    minute=0,
     second=0,
     max_instances=1,
     coalesce=True
@@ -114,7 +129,7 @@ scheduler.add_job(
 scheduler.add_job(
     fetch_and_update,
     'cron',
-    minute=30,       # 30분
+    minute=30,
     second=0,
     max_instances=1,
     coalesce=True
