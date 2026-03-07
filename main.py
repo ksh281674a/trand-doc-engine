@@ -1,8 +1,8 @@
 import time
 import os
-import random
+import json
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from pytrends.request import TrendReq
 import firebase_admin
 from firebase_admin import credentials, db
@@ -12,25 +12,9 @@ from flask import Flask
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# 1. Firebase 인증 (파일 경로 에러 완벽 차단)
+# 1. Firebase 인증
 # ---------------------------------------------------------
-# 사용자님이 주신 JSON 데이터를 파일 없이 변수로 바로 넣었습니다.
-service_account_info = {
-  "type": "service_account",
-  "project_id": "trand-doc",
-  "private_key_id": "eb94df5a568c0b644922b418c9aab01b588d9f06",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDYZMCIOTCDp1b0\nyCThF144nIhaH7rjL+xicU/azv9IWJIaOb5uz9X0Qnu0ePBx0VR/AtcELcO+OZRe\nS+eCgtDQ2RCK8tdd8mUnLkoBvR4ENY2HnTMomYJ3FEIRkCyjWnhjABYDBXt1DNa6\nj0SG8hJ2NDQeX/disjeCEKP8uYr5IIjpZabU9tsi+Sy74Aoli3UVQufoy0Wpy/Nf\nv9NBxeIFpoaxUB3iZpO3alFr7FU9a1aXcPxu+0CHcatnD4Pp4ywPaupCxFTxBxOo\nLR9nuzk2GHD0lSG6CzBFt+1RvZzUrO0kTkNZWUgL8M66FsjWq+5VbGDKhuvfn2fl\nv1FSAEo5AgMBAAECggEAKd2oUFK8O6R7EuXMGM6EGLDUQpeD+WNyuQMSP5Ov2Ufl\nkHRejyLf0p+wPlTttB+bWO1sOy89gUazmWDXHC2CB/4PEMr19wOoJWHzyI1Vytuv\nk67K0I6Oqso9FBfQQxSEWScRmykK3zUKMFL6n58jCkKEWOIZQzuWuK/Ogl1FcXhK\nJdQG+8VwzQurtoFv7uEgautqsay3F4oVY/HTEpbliSaCAoJ11gkxAkDHGmQP/C9A\nxwLnBiS1TFEBJzVhrujkDq7HUlcFfT6IMfG6REJ1GJSLP147jhgpad55+/jo4PpE\n26JVCsk9kUDdgB9X5x8v1ssfb7S19t32QhNqI62yLwKBgQD84TR9Z9D5txfgf4iL\nvh6gDlb5fjYu1YGvyCEmOE6sCJeoF2CRPr6CPIhSxxcWIYf0vT+g9oPyOqBwqVfD\nDklZRHVBUIBtYLWApVSajid+oSBOYA/1TjZ8WpjFHKgKRop/EH2v6Y16OOdgC/BW\nN9HDAG5nFb78WVcCUjwSm6pMWwKBgQDbEEt5KThSnghkAYZqrpgLARcLf4/LQ0V4\ZhluY5CBq4eaWTJm3R3tSlmk2vBlAsRXPLJPgcycLsne7CTnLsrlYunUFxMt4/c2\n/s8v1wImuBt2CZ9+KgmCgKv5xW9xBZNyfareDouAZ9lf9kMd/AR6dRCWBWrLoAGl\n85VpZGXX+wKBgQDtfd+bCx4S9+Zfu8aUXyhJ7021oNfoIjJa0Rx41ZblMGilv9a8\nce3fSFRLUZkX+sPBkN6qH/qJSpAVXqUClm9Ce+2XOrByiMnNGPic8nabEV3S3Zr/\nKcY4AanKLQCQLfGyJd20kSaCq+B4rp23i1LfzY7iF2U3f/wcPPkYDMPiUwKBgQC6\nXPB4URLzZjJpMcrysznyEqlSROFF4SMWvHViLh3f0td3/e4dCHvPRXNiBkiBBouW\nU7K2ZQx2ym8+0NLMQkimQTIAFulgHxJPnRMR9e6Elhf2oVUodgbFGUY1JTwbgMzh\nl/tnEiSnxrFtLAoJVj9RFopXtqAWPzdnwQQZNypVRQKBgG0IIxTzZhtDZE8BShFW\n83trbUHkw0KBsztoU7C4LcsaP7It3CpGvaNC6sU0LKHadGQ3fw2A/J4kInZ3aHv0\n6VfSzrbKmz3Vprvzlh80wfZiifuRVTFKcWP8TLN1RQYOi9yYsRtvd9aeo/t6MiqE\nz+g2BVwl576hZrh3pJSM2c0a\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk-fbsvc@trand-doc.iam.gserviceaccount.com",
-  "client_id": "104483003439945965503",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40trand-doc.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-}
-
-# [핵심] 파일 이름 대신 위 딕셔너리 데이터를 바로 넣습니다.
-cred = credentials.Certificate(service_account_info)
+cred = credentials.Certificate(json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"]))
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
 })
@@ -38,7 +22,7 @@ firebase_admin.initialize_app(cred, {
 pytrends = TrendReq(hl='ko-KR', tz=540)
 
 # ---------------------------------------------------------
-# 2. 34개 종목 데이터 (수정 없음)
+# 2. 34개 종목 데이터
 # ---------------------------------------------------------
 TICKERS_DATA = {
     "카카오": 42, "인스타그램": 55, "틱톡": 48, "X (트위터)": 50,
@@ -53,7 +37,7 @@ TICKERS_DATA = {
 }
 
 # ---------------------------------------------------------
-# 3. 실시간 알고리즘 (수정 없음)
+# 3. 실시간 알고리즘
 # ---------------------------------------------------------
 def generate_ticks():
     all_trends = db.reference('trends').get()
@@ -67,7 +51,8 @@ def generate_ticks():
             pull = (target - current) * 0.06
             next_tick = current + (noise * 1.0) + pull
             updates[f'{ticker}/current_yield'] = round(next_tick, 4)
-        except: continue
+        except:
+            continue
     if updates:
         db.reference('trends').update(updates)
 
@@ -95,7 +80,7 @@ def fetch_and_update():
             target_yield = (current_score - baseline) * 0.5
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield:+.2f}%")
-            time.sleep(12) 
+            time.sleep(12)
         except Exception as e:
             print(f" ❌ {ticker} 오류: {e}")
 
@@ -104,9 +89,17 @@ def initialize_app():
     for ticker, avg in TICKERS_DATA.items():
         ref = db.reference(f'trends/{ticker}')
         if not ref.get():
-            ref.set({'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 'current_yield': 0.0})
+            ref.set({
+                'baseline': avg,
+                'last_score': avg,
+                'target_yield': 0.0,
+                'current_yield': 0.0
+            })
     print("✅ 모든 데이터 연결 완료!")
 
+# ---------------------------------------------------------
+# 4. 스케줄러
+# ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 scheduler.add_job(fetch_and_update, 'cron', minute='*/7')
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
