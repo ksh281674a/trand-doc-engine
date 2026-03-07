@@ -12,25 +12,29 @@ from flask import Flask
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# 1. Firebase 인증 (serviceAccountKey.json 파일 경로 보정)
+# 1. Firebase 인증 (경로 인식 문제 수정)
 # ---------------------------------------------------------
-# [수정됨] 서버 환경에서도 파일을 확실히 찾을 수 있도록 경로를 자동 계산합니다.
+# 현재 main.py 파일이 있는 위치를 기준으로 키 파일을 찾도록 경로를 강제 지정합니다.
 base_path = os.path.dirname(os.path.abspath(__file__))
 key_path = os.path.join(base_path, "serviceAccountKey.json")
 
-if not os.path.exists(key_path):
-    print(f"❌ 오류: '{key_path}' 파일을 찾을 수 없습니다!")
-    print("GitHub에 serviceAccountKey.json 파일이 main.py와 같은 위치에 있는지 확인하세요.")
-else:
-    cred = credentials.Certificate("/절대/경로/serviceAccountKey.json")
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
-    })
+try:
+    # 파일이 존재하는지 먼저 확인
+    if not os.path.exists(key_path):
+        print(f"❌ [에러] '{key_path}' 파일을 찾을 수 없습니다.")
+    else:
+        cred = credentials.Certificate(key_path)
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
+        })
+        print("✅ Firebase 연결 성공")
+except Exception as e:
+    print(f"❌ [에러] Firebase 인증 중 문제 발생: {e}")
 
 pytrends = TrendReq(hl='ko-KR', tz=540)
 
 # ---------------------------------------------------------
-# 2. [데이터 삽입] 34개 종목명 및 평균 점수 (기준점수)
+# 2. [데이터 삽입] 34개 종목명 및 평균 점수 (기존과 동일)
 # ---------------------------------------------------------
 TICKERS_DATA = {
     "카카오": 42, "인스타그램": 55, "틱톡": 48, "X (트위터)": 50,
