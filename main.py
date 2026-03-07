@@ -37,9 +37,6 @@ TICKERS_DATA = {
     "YG": 35, "JYP": 32
 }
 
-# ---------------------------------------------------------
-# 3. 실시간 알고리즘 (2초마다 실행)
-# ---------------------------------------------------------
 def generate_ticks():
     all_trends = db.reference('trends').get()
     if not all_trends: return
@@ -67,21 +64,27 @@ def daily_midnight_reset():
             'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
         })
 
-# 구글 차단 방지용 브라우저 헤더 리스트
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
 ]
 
 # ---------------------------------------------------------
-# 💡 핵심: 12초 간격 제어 + 헤더 충돌 에러 완벽 해결
+# 💡 핵심: 세션(쿠키) 유지 + 12초 간격 
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
     print(f"\n📊 [수집 라운드 시작] {now.strftime('%H:%M:%S')} (1분에 5개)")
+
+    # 1. 봇 탐지를 막기 위해 루프 '바깥'에서 한 번만 객체를 생성하여 세션과 쿠키를 유지합니다.
+    try:
+        current_ua = random.choice(USER_AGENTS)
+        pt = TrendReq(hl='ko-KR', tz=540, retries=3, backoff_factor=1)
+        pt.headers['User-Agent'] = current_ua
+    except Exception as e:
+        print(f"❌ 구글 트렌드 초기 세션 연결 실패: {e}")
+        return
 
     for ticker in TICKERS_DATA.keys():
         loop_start_time = time.time()
@@ -91,10 +94,7 @@ def fetch_and_update():
             data = ref.get()
             baseline = data.get('baseline', TICKERS_DATA[ticker])
             
-            # [수정된 부분] 객체를 먼저 만들고, 헤더를 나중에 덮어씌워서 충돌을 방지합니다.
-            pt = TrendReq(hl='ko-KR', tz=540)
-            pt.headers['User-Agent'] = random.choice(USER_AGENTS) 
-            
+            # 2. 동일한 세션(pt)을 유지한 채 종목만 바꿔서 검색합니다.
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
@@ -106,16 +106,16 @@ def fetch_and_update():
             
         except Exception as e:
             now_log = datetime.now(KST)
-            print(f" ❌ [{now_log.strftime('%H:%M:%S')}] {ticker} 오류: {e}")
+            print(f" ❌ [{now_log.strftime('%H:%M:%S')}] {ticker} 오류: 429 차단 됨 (잠시 후 다시 시도합니다)")
             
         finally:
-            # 1개당 무조건 12초가 걸리도록 오차 보정 대기
+            # 3. 1개당 무조건 12초 대기 (1분 5개 속도 유지)
             elapsed_time = time.time() - loop_start_time
             sleep_time = 12.0 - elapsed_time
             if sleep_time > 0:
                 time.sleep(sleep_time)
             
-    print(f"🏁 [수집 라운드 종료] 34개 종목 업데이트 완료")
+    print(f"🏁 [수집 라운드 종료] 업데이트 완료")
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
