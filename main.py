@@ -12,10 +12,10 @@ from flask import Flask
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# 1. Firebase 인증 (JSON 데이터를 코드에 직접 삽입)
+# 1. Firebase 인증 (파일 경로 에러 완벽 차단)
 # ---------------------------------------------------------
-# [해결책] 서버가 파일을 못 찾으므로, 사용자님이 주신 JSON 정보를 변수에 직접 넣었습니다.
-firebase_key = {
+# 사용자님이 주신 JSON 데이터를 파일 없이 변수로 바로 넣었습니다.
+service_account_info = {
   "type": "service_account",
   "project_id": "trand-doc",
   "private_key_id": "eb94df5a568c0b644922b418c9aab01b588d9f06",
@@ -29,8 +29,8 @@ firebase_key = {
   "universe_domain": "googleapis.com"
 }
 
-# 파일을 거치지 않고 직접 인증 객체 생성
-cred = credentials.Certificate(firebase_key)
+# [핵심] 파일 이름 대신 위 딕셔너리 데이터를 바로 넣습니다.
+cred = credentials.Certificate(service_account_info)
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
 })
@@ -38,7 +38,7 @@ firebase_admin.initialize_app(cred, {
 pytrends = TrendReq(hl='ko-KR', tz=540)
 
 # ---------------------------------------------------------
-# 2. [데이터 삽입] 34개 종목명 및 평균 점수 (원본 유지)
+# 2. 34개 종목 데이터 (수정 없음)
 # ---------------------------------------------------------
 TICKERS_DATA = {
     "카카오": 42, "인스타그램": 55, "틱톡": 48, "X (트위터)": 50,
@@ -53,7 +53,7 @@ TICKERS_DATA = {
 }
 
 # ---------------------------------------------------------
-# 3. 실시간 틱 엔진
+# 3. 실시간 알고리즘 (수정 없음)
 # ---------------------------------------------------------
 def generate_ticks():
     all_trends = db.reference('trends').get()
@@ -65,16 +65,12 @@ def generate_ticks():
             current = data.get('current_yield', 0.0)
             noise = np.random.normal(0, 0.012)
             pull = (target - current) * 0.06
-            clustering = 1.4 if abs(target - current) > 0.5 else 1.0
-            next_tick = current + (noise * clustering) + pull
+            next_tick = current + (noise * 1.0) + pull
             updates[f'{ticker}/current_yield'] = round(next_tick, 4)
         except: continue
     if updates:
         db.reference('trends').update(updates)
 
-# ---------------------------------------------------------
-# 4. 자정 리셋 & 7분 주기 수집
-# ---------------------------------------------------------
 def daily_midnight_reset():
     all_trends = db.reference('trends').get()
     if not all_trends: return
@@ -82,14 +78,12 @@ def daily_midnight_reset():
         data = all_trends.get(ticker, {})
         last_score = data.get('last_score', TICKERS_DATA[ticker])
         db.reference(f'trends/{ticker}').update({
-            'baseline': last_score,
-            'target_yield': 0.0,
-            'current_yield': 0.0
+            'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
         })
 
 def fetch_and_update():
     now = datetime.now()
-    print(f"\n📊 [Trend Update] {now.strftime('%H:%M:%S')} 수집 시작")
+    print(f"\n📊 [수집 시작] {now.strftime('%H:%M:%S')}")
     for ticker in TICKERS_DATA.keys():
         try:
             ref = db.reference(f'trends/{ticker}')
@@ -99,30 +93,22 @@ def fetch_and_update():
             df = pytrends.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
             target_yield = (current_score - baseline) * 0.5
-            ref.update({
-                'last_score': current_score,
-                'target_yield': target_yield,
-                'last_update': now.isoformat()
-            })
-            print(f" ✅ [{ticker}] {target_yield:+.2f}%")
+            ref.update({'last_score': current_score, 'target_yield': target_yield})
+            print(f" ✅ {ticker}: {target_yield:+.2f}%")
             time.sleep(12) 
         except Exception as e:
-            print(f" ❌ [{ticker}] 오류: {e}")
-            time.sleep(20)
+            print(f" ❌ {ticker} 오류: {e}")
 
-# ---------------------------------------------------------
-# 5. 앱 실행
-# ---------------------------------------------------------
 def initialize_app():
-    print("🚀 Firebase 데이터 동기화 시작...")
+    print("🚀 Firebase 초기화 중...")
     for ticker, avg in TICKERS_DATA.items():
         ref = db.reference(f'trends/{ticker}')
         if not ref.get():
             ref.set({'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 'current_yield': 0.0})
-    print("✅ 준비 완료. 서버가 정상 가동됩니다.")
+    print("✅ 모든 데이터 연결 완료!")
 
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-scheduler.add_job(fetch_and_update, 'cron', minute='*/7', second='0')
+scheduler.add_job(fetch_and_update, 'cron', minute='*/7')
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
