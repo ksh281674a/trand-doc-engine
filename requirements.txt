@@ -1,5 +1,5 @@
 flask
-pytrends
+pytrends-modern
 gspread
 firebase-admin
 apscheduler
