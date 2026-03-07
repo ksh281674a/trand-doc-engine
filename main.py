@@ -89,7 +89,7 @@ def fetch_and_update():
         except Exception as e:
             print(f" ❌ {ticker} 오류: {e}")
         finally:
-            time.sleep(random.uniform(5, 10))  # 5~10초 랜덤 대기
+            time.sleep(random.uniform(15, 25))  # 15~25초 랜덤 대기
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
