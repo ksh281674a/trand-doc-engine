@@ -77,26 +77,23 @@ USER_AGENTS = [
 ]
 
 # ---------------------------------------------------------
-# 💡 핵심: 통신 시간을 계산하여 오차 없이 정확히 12초 간격 맞춤
+# 💡 핵심: 12초 간격 제어 + 헤더 충돌 에러 완벽 해결
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
-    print(f"\n📊 [수집 라운드 시작] {now.strftime('%H:%M:%S')} (정확히 1분에 5개 속도)")
+    print(f"\n📊 [수집 라운드 시작] {now.strftime('%H:%M:%S')} (1분에 5개)")
 
     for ticker in TICKERS_DATA.keys():
-        loop_start_time = time.time() # 종목 수집 시작 시간 기록
+        loop_start_time = time.time()
         
         try:
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
             baseline = data.get('baseline', TICKERS_DATA[ticker])
             
-            current_ua = random.choice(USER_AGENTS)
-            pt = TrendReq(
-                hl='ko-KR',
-                tz=540,
-                requests_args={'headers': {'User-Agent': current_ua}}
-            )
+            # [수정된 부분] 객체를 먼저 만들고, 헤더를 나중에 덮어씌워서 충돌을 방지합니다.
+            pt = TrendReq(hl='ko-KR', tz=540)
+            pt.headers['User-Agent'] = random.choice(USER_AGENTS) 
             
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
@@ -112,14 +109,13 @@ def fetch_and_update():
             print(f" ❌ [{now_log.strftime('%H:%M:%S')}] {ticker} 오류: {e}")
             
         finally:
-            # [오차 보정 타이머] 데이터를 가져오는데 걸린 시간을 잰 후, 12초에서 남은 시간만 대기
+            # 1개당 무조건 12초가 걸리도록 오차 보정 대기
             elapsed_time = time.time() - loop_start_time
             sleep_time = 12.0 - elapsed_time
-            
             if sleep_time > 0:
-                time.sleep(sleep_time) # 남은 시간만큼만 정확히 쉼
+                time.sleep(sleep_time)
             
-    print(f"🏁 [수집 라운드 종료] 34개 종목 업데이트 완료 (총 소요시간: 약 6분 48초)")
+    print(f"🏁 [수집 라운드 종료] 34개 종목 업데이트 완료")
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
@@ -145,7 +141,7 @@ next_minute = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
 scheduler.add_job(
     fetch_and_update,
     'interval',
-    minutes=7,                # 34개 도는데 6분 48초가 걸리므로 7분 주기가 완벽함
+    minutes=7,                
     next_run_time=next_minute, 
     max_instances=1,
     coalesce=True
