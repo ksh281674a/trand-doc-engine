@@ -67,24 +67,33 @@ def daily_midnight_reset():
             'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
         })
 
+# 구글 차단 방지용 브라우저 헤더 리스트
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
+]
+
 def fetch_and_update():
     now = datetime.now(KST)
-    print(f"\n📊 [전체 수집 시작] {now.strftime('%H:%M:%S')}")
+    print(f"\n📊 [전체 수집 시작] {now.strftime('%H:%M:%S')} (목표: 1분 5개, 총 7분 이내)")
 
     for ticker in TICKERS_DATA.keys():
         try:
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
             baseline = data.get('baseline', TICKERS_DATA[ticker])
+            
+            # 매 요청마다 랜덤 브라우저인 척 속이기
+            current_ua = random.choice(USER_AGENTS)
             pt = TrendReq(
                 hl='ko-KR',
                 tz=540,
-                requests_args={
-                    'headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
-                }
+                requests_args={'headers': {'User-Agent': current_ua}}
             )
+            
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
@@ -92,11 +101,14 @@ def fetch_and_update():
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             now_log = datetime.now(KST)
             print(f" ✅ [{now_log.strftime('%H:%M:%S')}] {ticker}: {target_yield:+.2f}%")
+            
         except Exception as e:
             now_log = datetime.now(KST)
             print(f" ❌ [{now_log.strftime('%H:%M:%S')}] {ticker} 오류: {e}")
+            
         finally:
-            time.sleep(random.uniform(50, 56))
+            # [핵심] 평균 12초 대기 (1분에 5개 속도). 10~14초 사이 랜덤으로 봇 탐지 회피
+            time.sleep(random.uniform(10, 14))
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
@@ -112,25 +124,13 @@ def initialize_app():
     print("✅ 모든 데이터 연결 완료!")
 
 # ---------------------------------------------------------
-# 4. 스케줄러 (매시 00분, 30분 정각에 수집)
+# 4. 스케줄러 (기존: 매시 00분, 30분 수집)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-scheduler.add_job(
-    fetch_and_update,
-    'cron',
-    minute=0,
-    second=0,
-    max_instances=1,
-    coalesce=True
-)
-scheduler.add_job(
-    fetch_and_update,
-    'cron',
-    minute=30,
-    second=0,
-    max_instances=1,
-    coalesce=True
-)
+
+# 현재 30분에 한 번씩 수집하도록 설정되어 있습니다.
+scheduler.add_job(fetch_and_update, 'cron', minute=0, second=0, max_instances=1, coalesce=True)
+scheduler.add_job(fetch_and_update, 'cron', minute=30, second=0, max_instances=1, coalesce=True)
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
