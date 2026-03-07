@@ -22,7 +22,7 @@ if not os.path.exists(key_path):
     print(f"❌ 오류: '{key_path}' 파일을 찾을 수 없습니다!")
     print("GitHub에 serviceAccountKey.json 파일이 main.py와 같은 위치에 있는지 확인하세요.")
 else:
-    cred = credentials.Certificate(key_path)
+    cred = credentials.Certificate("/절대/경로/serviceAccountKey.json")
     firebase_admin.initialize_app(cred, {
         'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
     })
