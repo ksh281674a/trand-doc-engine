@@ -12,29 +12,29 @@ from flask import Flask
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# 1. Firebase 인증 (경로 인식 문제 수정)
+# 1. Firebase 인증 (경로 인식 오류 해결 버전)
 # ---------------------------------------------------------
-# 현재 main.py 파일이 있는 위치를 기준으로 키 파일을 찾도록 경로를 강제 지정합니다.
-base_path = os.path.dirname(os.path.abspath(__file__))
-key_path = os.path.join(base_path, "serviceAccountKey.json")
-
+# 현재 실행 중인 main.py의 절대 경로를 기준으로 키 파일을 찾습니다.
 try:
-    # 파일이 존재하는지 먼저 확인
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    key_path = os.path.join(base_path, "serviceAccountKey.json")
+
     if not os.path.exists(key_path):
-        print(f"❌ [에러] '{key_path}' 파일을 찾을 수 없습니다.")
+        # 파일이 없을 경우 출력되는 로그
+        print(f"❌ [경로 오류] 파일을 찾을 수 없습니다: {key_path}")
     else:
         cred = credentials.Certificate(key_path)
         firebase_admin.initialize_app(cred, {
             'databaseURL': 'https://trand-doc-default-rtdb.firebaseio.com/'
         })
-        print("✅ Firebase 연결 성공")
+        print("✅ [성공] Firebase 인증 완료")
 except Exception as e:
-    print(f"❌ [에러] Firebase 인증 중 문제 발생: {e}")
+    print(f"❌ [인증 실패] {e}")
 
 pytrends = TrendReq(hl='ko-KR', tz=540)
 
 # ---------------------------------------------------------
-# 2. [데이터 삽입] 34개 종목명 및 평균 점수 (기존과 동일)
+# 2. [데이터] 34개 종목명 및 평균 점수 (원본 유지)
 # ---------------------------------------------------------
 TICKERS_DATA = {
     "카카오": 42, "인스타그램": 55, "틱톡": 48, "X (트위터)": 50,
@@ -52,7 +52,6 @@ TICKERS_DATA = {
 # 3. 실시간 틱 엔진 (4대 알고리즘)
 # ---------------------------------------------------------
 def generate_ticks():
-    """2초마다 current_yield를 꿈틀거리게 업데이트"""
     all_trends = db.reference('trends').get()
     if not all_trends: return
 
@@ -62,7 +61,6 @@ def generate_ticks():
             target = data.get('target_yield', 0.0)
             current = data.get('current_yield', 0.0)
             
-            # 가우시안 노이즈 + 평균 회귀 + 변동성 클러스터링
             noise = np.random.normal(0, 0.012)
             pull = (target - current) * 0.06
             clustering = 1.4 if abs(target - current) > 0.5 else 1.0
@@ -75,17 +73,15 @@ def generate_ticks():
         db.reference('trends').update(updates)
 
 # ---------------------------------------------------------
-# 4. 자정 리셋 & 7분 주기 수집 (로그 강화)
+# 4. 자정 리셋 & 7분 주기 수집 (상세 로그 강화)
 # ---------------------------------------------------------
 def daily_midnight_reset():
-    """KST 00:00:00 - 어제 마지막 점수가 오늘의 기준가(0%)가 됨"""
     print(f"\n🌕 [Midnight Reset] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     all_trends = db.reference('trends').get()
     if not all_trends: return
 
     for ticker in TICKERS_DATA.keys():
         data = all_trends.get(ticker, {})
-        # 어제 마지막으로 수집된 점수 (없으면 초기 평균점수 사용)
         last_score = data.get('last_score', TICKERS_DATA[ticker])
         
         db.reference(f'trends/{ticker}').update({
@@ -94,10 +90,9 @@ def daily_midnight_reset():
             'current_yield': 0.0,
             'reset_at': datetime.now().isoformat()
         })
-        print(f" > {ticker}: 기준가 {last_score} 갱신 (수익률 0% 초기화)")
+        print(f" > {ticker}: 기준가 {last_score}로 리셋")
 
 def fetch_and_update():
-    """7분 주기 수집 - 1분 5개 제한 및 업데이트 로그 출력"""
     now = datetime.now()
     print(f"\n📊 [Trend Update] {now.strftime('%H:%M:%S')} 수집 시작")
     print("-" * 50)
@@ -106,15 +101,12 @@ def fetch_and_update():
         try:
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
-            # Firebase에 저장된 기준가 로드 (자정 리셋 시 갱신된 값)
-            baseline = data.get('baseline', TICKERS_DATA[ticker]) if data else TICKERS_DATA[ticker]
+            baseline = data.get('baseline', TICKERS_DATA[ticker])
             
-            # 구글 트렌드 API 호출
             pytrends.build_payload([ticker], timeframe='now 1-H')
             df = pytrends.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
             
-            # 수익률 계산: (현재 점수 - 기준가) * 0.5
             target_yield = (current_score - baseline) * 0.5
             
             ref.update({
@@ -123,11 +115,10 @@ def fetch_and_update():
                 'last_update': now.isoformat()
             })
             
-            # 로그 출력
             status = "▲" if target_yield > 0 else "▼" if target_yield < 0 else "-"
-            print(f" ✅ [{ticker}] {status} {target_yield:+.2f}% (점수: {current_score} / 기준: {baseline})")
+            print(f" ✅ [{ticker}] {status} {target_yield:+.2f}% (현재: {current_score} / 기준: {baseline})")
             
-            time.sleep(12) # 💡 속도 제한 (1분 5개)
+            time.sleep(12) 
             
         except Exception as e:
             print(f" ❌ [{ticker}] 오류: {e}")
@@ -137,15 +128,13 @@ def fetch_and_update():
 # 5. 초기화 및 앱 가동
 # ---------------------------------------------------------
 def initialize_app():
-    print("🚀 [System] Firebase 초기 데이터 확인 중...")
+    print("🚀 [System] Firebase 초기 데이터 점검...")
     for ticker, avg in TICKERS_DATA.items():
         ref = db.reference(f'trends/{ticker}')
         if not ref.get():
             ref.set({
-                'baseline': avg, 
-                'last_score': avg, 
-                'target_yield': 0.0, 
-                'current_yield': 0.0
+                'baseline': avg, 'last_score': avg, 
+                'target_yield': 0.0, 'current_yield': 0.0
             })
     print("✅ 데이터 준비 완료.")
 
