@@ -3,7 +3,7 @@ import os
 import json
 import random
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from pytrends_modern import TrendReq
 import firebase_admin
@@ -38,7 +38,7 @@ TICKERS_DATA = {
 }
 
 # ---------------------------------------------------------
-# 3. 실시간 알고리즘
+# 3. 실시간 알고리즘 (2초마다 실행)
 # ---------------------------------------------------------
 def generate_ticks():
     all_trends = db.reference('trends').get()
@@ -76,17 +76,21 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
 ]
 
+# ---------------------------------------------------------
+# 💡 핵심: 통신 시간을 계산하여 오차 없이 정확히 12초 간격 맞춤
+# ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
-    print(f"\n📊 [전체 수집 시작] {now.strftime('%H:%M:%S')} (목표: 1분 5개, 총 7분 이내)")
+    print(f"\n📊 [수집 라운드 시작] {now.strftime('%H:%M:%S')} (정확히 1분에 5개 속도)")
 
     for ticker in TICKERS_DATA.keys():
+        loop_start_time = time.time() # 종목 수집 시작 시간 기록
+        
         try:
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
             baseline = data.get('baseline', TICKERS_DATA[ticker])
             
-            # 매 요청마다 랜덤 브라우저인 척 속이기
             current_ua = random.choice(USER_AGENTS)
             pt = TrendReq(
                 hl='ko-KR',
@@ -98,6 +102,7 @@ def fetch_and_update():
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
             target_yield = (current_score - baseline) * 0.5
+            
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             now_log = datetime.now(KST)
             print(f" ✅ [{now_log.strftime('%H:%M:%S')}] {ticker}: {target_yield:+.2f}%")
@@ -107,8 +112,14 @@ def fetch_and_update():
             print(f" ❌ [{now_log.strftime('%H:%M:%S')}] {ticker} 오류: {e}")
             
         finally:
-            # [핵심] 평균 12초 대기 (1분에 5개 속도). 10~14초 사이 랜덤으로 봇 탐지 회피
-            time.sleep(random.uniform(10, 14))
+            # [오차 보정 타이머] 데이터를 가져오는데 걸린 시간을 잰 후, 12초에서 남은 시간만 대기
+            elapsed_time = time.time() - loop_start_time
+            sleep_time = 12.0 - elapsed_time
+            
+            if sleep_time > 0:
+                time.sleep(sleep_time) # 남은 시간만큼만 정확히 쉼
+            
+    print(f"🏁 [수집 라운드 종료] 34개 종목 업데이트 완료 (총 소요시간: 약 6분 48초)")
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
@@ -124,13 +135,22 @@ def initialize_app():
     print("✅ 모든 데이터 연결 완료!")
 
 # ---------------------------------------------------------
-# 4. 스케줄러 (기존: 매시 00분, 30분 수집)
+# 4. 스케줄러 (7분 주기)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-# 현재 30분에 한 번씩 수집하도록 설정되어 있습니다.
-scheduler.add_job(fetch_and_update, 'cron', minute=0, second=0, max_instances=1, coalesce=True)
-scheduler.add_job(fetch_and_update, 'cron', minute=30, second=0, max_instances=1, coalesce=True)
+now_kst = datetime.now(KST)
+next_minute = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
+
+scheduler.add_job(
+    fetch_and_update,
+    'interval',
+    minutes=7,                # 34개 도는데 6분 48초가 걸리므로 7분 주기가 완벽함
+    next_run_time=next_minute, 
+    max_instances=1,
+    coalesce=True
+)
+
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
