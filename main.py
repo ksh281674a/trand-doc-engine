@@ -68,7 +68,7 @@ def daily_midnight_reset():
         })
 
 def fetch_and_update():
-    now = datetime.now(KST)  # 한국 시간
+    now = datetime.now(KST)
     print(f"\n📊 [전체 수집 시작] {now.strftime('%H:%M:%S')}")
 
     for ticker in TICKERS_DATA.keys():
@@ -79,8 +79,6 @@ def fetch_and_update():
             pt = TrendReq(
                 hl='ko-KR',
                 tz=540,
-                retries=3,
-                backoff_factor=2.0,
                 requests_args={
                     'headers': {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
