@@ -2,7 +2,6 @@ import time
 import os
 import json
 import random
-import itertools
 import numpy as np
 from datetime import datetime
 from pytrends.request import TrendReq
@@ -36,9 +35,6 @@ TICKERS_DATA = {
     "YG": 35, "JYP": 32
 }
 
-# 중복 없이 순환
-ticker_cycle = itertools.cycle(list(TICKERS_DATA.keys()))
-
 # ---------------------------------------------------------
 # 3. 실시간 알고리즘
 # ---------------------------------------------------------
@@ -70,11 +66,10 @@ def daily_midnight_reset():
         })
 
 def fetch_and_update():
-    batch = [next(ticker_cycle) for _ in range(5)]
     now = datetime.now()
-    print(f"\n📊 [수집 시작] {now.strftime('%H:%M:%S')} → {', '.join(batch)}")
+    print(f"\n📊 [전체 수집 시작] {now.strftime('%H:%M:%S')}")
 
-    for ticker in batch:
+    for ticker in TICKERS_DATA.keys():
         try:
             ref = db.reference(f'trends/{ticker}')
             data = ref.get()
@@ -89,7 +84,7 @@ def fetch_and_update():
         except Exception as e:
             print(f" ❌ {ticker} 오류: {e}")
         finally:
-            time.sleep(random.uniform(15, 25))  # 15~25초 랜덤 대기
+            time.sleep(random.uniform(50, 56))  # 평균 53초 × 34개 = 약 30분
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
@@ -108,7 +103,22 @@ def initialize_app():
 # 4. 스케줄러
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-scheduler.add_job(fetch_and_update, 'cron', minute='*/1', second=0)
+scheduler.add_job(
+    fetch_and_update,
+    'cron',
+    minute=0,        # 정각 (0분, 30분)
+    second=0,
+    max_instances=1,
+    coalesce=True
+)
+scheduler.add_job(
+    fetch_and_update,
+    'cron',
+    minute=30,       # 30분
+    second=0,
+    max_instances=1,
+    coalesce=True
+)
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
