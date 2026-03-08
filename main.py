@@ -66,27 +66,20 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # [로직 1] 시간 비례 수렴 보폭 계산
                 elapsed_sec = now_ts - last_update_ts
                 remaining_sec = max(5, 420 - elapsed_sec)
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
-                # 수익률이 클수록 정직하게 추종, 낮을수록 지그재그
                 reverse_prob = 0.45 - min(0.35, abs(distance) * 10)
                 
                 if random.random() > reverse_prob:
-                    # 정방향 추세 가속도 (멀수록 강력하게 직진)
                     speed_boost = 1.8 + min(2.2, abs(distance) * 15)
                     move = ideal_step * random.uniform(speed_boost * 0.8, speed_boost * 1.2)
                 else:
-                    # 역방향/눌림목
                     move = -ideal_step * random.uniform(0.7, 1.5)
                 
-                # 마이크로 진동 (Anti-Quiet)
                 shiver = np.random.normal(0, 0.0011) 
-                
-                # Wick Pressure (꼬리 형성)
                 current_candle_open = ohlc_buffer.get(ticker, {}).get('open', current)
                 wick_pressure = -(current - current_candle_open) * 0.1
                 
@@ -131,7 +124,6 @@ def record_minute_candle():
 # 4. 수집 및 자정 리셋 로직
 # ---------------------------------------------------------
 def daily_reset():
-    """매일 자정(00:00) 전날 최종 점수를 Baseline으로 설정하여 0% 리셋"""
     print(f"\n🕛 [자정 리셋 시작] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
     try:
         ref = db.reference('chart_data/trends')
@@ -160,7 +152,6 @@ def fetch_and_update():
     now = datetime.now(KST)
     now_ts = int(time.time())
     
-    # 7개 그룹 분할 (0~6 사이클)
     group_idx = now.minute % 7
     items_per_group = 5 
     start_idx = group_idx * items_per_group
@@ -169,14 +160,13 @@ def fetch_and_update():
     
     if not current_group_tickers: return
 
-    # 🌟 로그 강화: 그룹 시작 헤더
     print(f"\n──────────────── 그룹 {group_idx} 수집 시작 ────────────────")
     print(f"⏰ 시각: {now.strftime('%H:%M:%S')}")
     print(f"📦 대상: {', '.join(current_group_tickers)}")
     
     try:
         pt = TrendReq(hl='ko-KR', tz=540)
-        pt.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'
+        pt.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         
         for ticker in current_group_tickers:
             loop_start = time.time()
@@ -196,17 +186,15 @@ def fetch_and_update():
                     'target_yield': target_yield,
                     'last_update_ts': now_ts
                 })
-                # 🌟 로그 강화: 종목별 실시간 결과 출력
-                print(f" ✅ {ticker.ljust(8)}: {target_yield * 100:+.2f}% (점수: {current_score})")
+                print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (점수: {current_score})")
                 
             except Exception as e:
-                print(f" ❌ {ticker.ljust(8)} 수집 실패: {e}")
+                print(f" ❌ {ticker.ljust(10)} 수집 실패: {e}")
                 continue
             finally:
                 elapsed = time.time() - loop_start
                 if elapsed < 11.0: time.sleep(11.0 - elapsed)
         
-        # 🌟 로그 강화: 그룹 완료 푸터
         print(f"──────────────── 그룹 {group_idx} 수집 완료 ────────────────")
         
     except Exception as e:
@@ -229,27 +217,43 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    # 틱 주기를 촘촘하게 하여 부드러운 움직임 확보
     next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.5, 1.1))
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
 if __name__ == "__main__":
     initialize_app()
     now = datetime.now(KST)
+    
+    # 🌟 [수정 핵심] 서버 시작 시 즉시 실행하지 않고, 무조건 다음 00초 정각부터 시작
     next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     
     print(f"📡 시스템 대기 중... 첫 정각 동기화 시각: {next_sync_time.strftime('%H:%M:%S')}")
 
-    # 1. 즉시 한 번 수집 실행 및 정각 주기 설정
-    scheduler.add_job(fetch_and_update, 'date', run_date=now)
-    scheduler.add_job(fetch_and_update, 'interval', minutes=1, start_date=next_sync_time, max_instances=1, coalesce=True)
-    scheduler.add_job(record_minute_candle, 'interval', minutes=1, start_date=next_sync_time)
+    # 1. 1분 간격 수집 스케줄 (시작 시간을 00초 정각으로 고정)
+    scheduler.add_job(
+        fetch_and_update, 
+        'interval', 
+        minutes=1, 
+        start_date=next_sync_time, 
+        max_instances=1, 
+        coalesce=True
+    )
     
-    # 자정 리셋 스케줄러 (한국시간 00:00:00)
+    # 2. 1분 간격 캔들 저장 스케줄 (시작 시간을 00초 정각으로 고정)
+    scheduler.add_job(
+        record_minute_candle, 
+        'interval', 
+        minutes=1, 
+        start_date=next_sync_time
+    )
+    
+    # 3. 자정 리셋 스케줄러 (한국시간 00:00:00)
     scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
     
+    # 4. 실시간 틱 엔진 가동 (틱은 즉시 시작하여 차트 움직임 유지)
     run_ticks()
+    
     scheduler.start()
     
-    # 배포용 Flask 실행
+    # Flask 실행
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
