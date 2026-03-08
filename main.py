@@ -48,7 +48,7 @@ TICKER_KEYS = list(TICKERS_DATA.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (꼬리 생성 및 회귀 로직 강화)
+# 3. 데이터 엔진 (역동적 추세 및 지그재그 로직)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -66,28 +66,35 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # [로직 1] 7분 선형 수렴 보폭
+                # [로직 1] 7분 선형 수렴 시간 계산
                 elapsed_sec = now_ts - last_update_ts
-                remaining_sec = max(10, 420 - elapsed_sec)
+                remaining_sec = max(5, 420 - elapsed_sec)
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
-                # [로직 2] 변동성 가중치
-                pull = ideal_step * random.uniform(0.7, 1.3)
-                noise = np.random.normal(0, 0.00035)
-                if random.random() < 0.35:
-                    noise -= pull * 1.2 
-
-                # 🌟 [개선] 꼬리 만들기 로직 (Wick Pressure)
-                # 시가(Open)로 돌아가려는 힘을 부여하여 꼬리를 형성
-                current_candle_open = ohlc_buffer.get(ticker, {}).get('open', current)
-                # 시가와의 괴리가 커질수록 시가 방향으로 당기는 탄성 계수 상향 (0.07)
-                wick_pressure = -(current - current_candle_open) * 0.07
+                # [로직 2] 확률적 추세 강화 (살아있는 리듬감)
+                # 65% 확률로 타겟 방향으로 쏘고, 35% 확률로 반대로 튀게 함 (음봉/양봉 섞기)
+                target_dir = np.sign(distance)
+                if random.random() < 0.65:
+                    # 추세 방향: 목표를 향해 힘차게 이동 (보폭 강화)
+                    move = ideal_step * random.uniform(1.5, 3.0)
+                else:
+                    # 반대 방향: 눌림목 형성 (일부러 반대로 튀기)
+                    move = -ideal_step * random.uniform(1.0, 2.0)
                 
-                next_tick = round(current + pull + noise + wick_pressure, 6)
+                # [로직 3] 마이크로 진동 (Anti-Quiet)
+                # 봉이 멈춰있지 않고 파르르 떨리게 만드는 고주파 노이즈
+                shiver = np.random.normal(0, 0.0009) 
+                
+                # [로직 4] Wick Pressure (기존 유지: 꼬리 만들기)
+                current_candle_open = ohlc_buffer.get(ticker, {}).get('open', current)
+                wick_pressure = -(current - current_candle_open) * 0.08
+                
+                # 최종 틱 계산
+                next_tick = round(current + move + shiver + wick_pressure, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
                 
-                # OHLC 버퍼 업데이트
+                # OHLC 버퍼 업데이트 (고점/저점 갱신)
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
                 else:
@@ -121,13 +128,12 @@ def record_minute_candle():
                 db.reference(f'chart_data/chart_history/{ticker}/1m').push({
                     'time': ts, 'open': candle['open'], 'high': candle['high'], 'low': candle['low'], 'close': candle['close']
                 })
-                # 다음 봉 시가를 이전 종가로 초기화
                 ohlc_buffer[ticker] = {'open': candle['close'], 'high': candle['close'], 'low': candle['close'], 'close': candle['close']}
     except Exception as e:
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 수집 로직 (1분 내 그룹 완수 및 로그 % 표시)
+# 4. 수집 로직 (기능 유지 + 정각 동기화)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -144,7 +150,6 @@ def fetch_and_update():
     print(f"\n📊 [그룹 {group_idx} 수집 시작] {now.strftime('%H:%M:%S')}")
     
     try:
-        # 429 에러 방지를 위한 retries 및 backoff 설정 유지
         pt = TrendReq(hl='ko-KR', tz=540, retries=5, backoff_factor=2)
         pt.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'
         
@@ -166,14 +171,12 @@ def fetch_and_update():
                     'target_yield': target_yield,
                     'last_update_ts': now_ts
                 })
-                # 모든 수집 라운드에서 % 결과를 로그에 명확히 출력
                 print(f" ✅ {ticker}: {target_yield * 100:+.2f}% (점수: {current_score})")
                 
             except Exception as e:
-                print(f" ❌ {ticker} 수집 실패 (429 혹은 통신에러): {e}")
+                print(f" ❌ {ticker} 수집 실패: {e}")
                 continue
             finally:
-                # 1분(60초) 내에 5개 종목을 끝내기 위해 대기 시간을 약 11초로 조정
                 elapsed = time.time() - loop_start
                 if elapsed < 11.0: time.sleep(11.0 - elapsed)
         
@@ -201,30 +204,29 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.8, 1.5))
+    # 틱 간격을 더 촘촘하게 하여 부드러움과 역동성을 동시에 확보 (0.6 ~ 1.1초)
+    next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.6, 1.1))
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
 if __name__ == "__main__":
     initialize_app()
     
-    # 서버 실행 시점으로부터 다음 '00초' 정각 계산
     now = datetime.now(KST)
     next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     
-    # 로그 출력
-    print(f"📡 시스템 대기 중... 첫 동기화 수집 시각: {next_sync_time.strftime('%H:%M:%S')}")
+    print(f"📡 시스템 대기 중... 첫 정각 동기화 시각: {next_sync_time.strftime('%H:%M:%S')}")
 
-    # 1. 즉시 수집 대신 정각까지 기다렸다가 첫 수집 시작 (00초 동기화 핵심)
+    # 1. 정각부터 시작하는 수집 스케줄
     scheduler.add_job(
         fetch_and_update, 
         'interval', 
         minutes=1, 
-        start_date=next_sync_time, # 🌟 여기서 정각 시작이 결정됩니다.
+        start_date=next_sync_time,
         max_instances=1, 
         coalesce=True
     )
     
-    # 2. 1분 봉 저장 (로그 출력 없음)
+    # 2. 정각부터 시작하는 봉 저장 스케줄
     scheduler.add_job(
         record_minute_candle, 
         'interval', 
@@ -232,10 +234,8 @@ if __name__ == "__main__":
         start_date=next_sync_time
     )
     
-    # 3. 틱 엔진은 즉시 구동하되 초기 current_yield 기반으로 시작
+    # 3. 실시간 틱 가동
     run_ticks()
     
     scheduler.start()
-    
-    # Flask 서버 가동
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
