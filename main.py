@@ -40,13 +40,13 @@ TICKERS_DATA = {
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (틱 생성 + OHLC 업데이트)
+# 3. 데이터 엔진 (보안 규칙 준수: chart_data 하위 경로 사용)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
-        all_trends = db.reference('trends').get()
+        # 모든 경로는 chart_data/ 하위로 제한
+        all_trends = db.reference('chart_data/trends').get()
         if not all_trends:
-            print("⚠️ [데이터 에러] Firebase 'trends' 경로에 데이터가 없습니다.")
             return
         
         updates_trends = {}
@@ -70,54 +70,50 @@ def generate_ticks():
                     ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], next_tick)
                     ohlc_buffer[ticker]['close'] = next_tick
                     
-            except Exception as e:
-                print(f"❌ [{ticker}] 틱 계산 에러: {e}")
-                continue
+            except: continue
                 
         if updates_trends:
-            db.reference('trends').update(updates_trends)
+            db.reference('chart_data/trends').update(updates_trends)
         if updates_live:
-            db.reference('live_data').update(updates_live)
+            db.reference('chart_data/live_data').update(updates_live)
 
     except Exception as e:
-        print(f"❌ [Firebase 연결 에러] generate_ticks 실패: {e}")
+        print(f"❌ generate_ticks 실패: {e}")
 
 def record_minute_candle():
-    """매 분 00초에 버퍼의 데이터를 chart_history에 확정 저장 (성공 로그 제거)"""
+    """매 분 00초에 버퍼의 데이터를 chart_data/chart_history에 확정 저장"""
     try:
         now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         ts = int(now_utc.timestamp())
         
-        if not ohlc_buffer:
-            return # 데이터가 없으면 조용히 종료
+        if not ohlc_buffer: return
 
         for ticker in TICKERS_DATA.keys():
             candle = ohlc_buffer.get(ticker)
             if candle:
-                db.reference(f'chart_history/{ticker}/1m').push({
+                # 보안 규칙 경로: chart_data/chart_history/...
+                db.reference(f'chart_data/chart_history/{ticker}/1m').push({
                     'time': ts,
                     'open': candle['open'],
                     'high': candle['high'],
                     'low': candle['low'],
                     'close': candle['close']
                 })
-                # 버퍼 초기화
                 ohlc_buffer[ticker] = {
                     'open': candle['close'], 'high': candle['close'], 
                     'low': candle['close'], 'close': candle['close']
                 }
     except Exception as e:
-        # 에러가 발생했을 때만 로그 출력
-        print(f"❌ [차트 저장 실패] chart_history/{ticker}/1m 경로 확인 필요: {e}")
+        print(f"❌ record_minute_candle 에러: {e}")
 
 def daily_midnight_reset():
     try:
-        all_trends = db.reference('trends').get()
+        all_trends = db.reference('chart_data/trends').get()
         if not all_trends: return
         for ticker in TICKERS_DATA.keys():
             data = all_trends.get(ticker, {})
             last_score = data.get('last_score', TICKERS_DATA[ticker])
-            db.reference(f'trends/{ticker}').update({
+            db.reference(f'chart_data/trends/{ticker}').update({
                 'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
             })
     except Exception as e:
@@ -145,7 +141,7 @@ def fetch_and_update():
     for ticker in TICKERS_DATA.keys():
         loop_start_time = time.time()
         try:
-            ref = db.reference(f'trends/{ticker}')
+            ref = db.reference(f'chart_data/trends/{ticker}')
             data = ref.get()
             baseline = data.get('baseline', TICKERS_DATA[ticker])
             
@@ -168,7 +164,7 @@ def initialize_app():
     print("🚀 Firebase 초기화 중...")
     try:
         for ticker, avg in TICKERS_DATA.items():
-            ref = db.reference(f'trends/{ticker}')
+            ref = db.reference(f'chart_data/trends/{ticker}')
             if not ref.get():
                 ref.set({'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 'current_yield': 0.0})
         print("✅ 데이터 엔진 준비 완료!")
