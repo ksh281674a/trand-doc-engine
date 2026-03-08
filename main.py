@@ -188,7 +188,7 @@ def fetch_and_update():
             target_yield = round(base_target + convergence_offset, 5)
             
             ref.update({'last_score': current_score, 'target_yield': target_yield})
-            print(f" ✅ {ticker}: {target_yield:+.2f}%")
+            print(f" ✅ {ticker}: {target_yield * 100:+.2f}%")
         except Exception as e:
             print(f" ❌ {ticker} 수집 실패: {e}")
         finally:
