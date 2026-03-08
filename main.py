@@ -15,7 +15,7 @@ app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
 
 # ---------------------------------------------------------
-# 1. Firebase 인증
+# 1. Firebase 인증 (기존 유지)
 # ---------------------------------------------------------
 try:
     cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
@@ -44,10 +44,12 @@ TICKERS_DATA = {
     "YG": 60, "JYP": 60
 }
 
+# [추가] 종목 리스트를 고정 순서로 변환
+TICKER_KEYS = list(TICKERS_DATA.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진
+# 3. 데이터 엔진 (기존 유지)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -111,29 +113,56 @@ def record_minute_candle():
     except Exception as e:
         print(f"❌ record_minute_candle 에러: {e}")
 
+# ---------------------------------------------------------
+# [수정] 분산 수집 로직 (중복 없이 그룹별 수집)
+# ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
-    print(f"\n📊 [수집 시작] {now.strftime('%H:%M:%S')}")
+    
+    # 총 34개 종목을 7분 주기로 나누기 (한 번에 4~5개씩)
+    # 현재 분(minute)을 7로 나눈 나머지에 따라 그룹 결정
+    group_idx = now.minute % 7
+    
+    # 수집할 종목 범위 계산
+    items_per_group = 5 # 기본 5개씩
+    start_idx = group_idx * items_per_group
+    end_idx = start_idx + items_per_group
+    
+    # 마지막 그룹이 리스트 끝까지 가져오도록 처리
+    current_group_tickers = TICKER_KEYS[start_idx:end_idx]
+    
+    if not current_group_tickers:
+        print(f"⚠️ [{now.strftime('%H:%M:%S')}] 해당 그룹에 수집할 종목이 없습니다.")
+        return
+
+    print(f"\n📊 [그룹 {group_idx} 수집 시작] {now.strftime('%H:%M:%S')} - 대상: {current_group_tickers}")
+    
     try:
         pt = TrendReq(hl='ko-KR', tz=540, retries=3, backoff_factor=1)
         pt.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-        for ticker in TICKERS_DATA.keys():
+        
+        for ticker in current_group_tickers:
             loop_start = time.time()
             try:
                 ref = db.reference(f'chart_data/trends/{ticker}')
                 data = ref.get() or {}
                 baseline = data.get('baseline', TICKERS_DATA[ticker])
+                
                 pt.build_payload([ticker], timeframe='now 1-H')
                 df = pt.interest_over_time()
                 current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
+                
                 target_yield = round((current_score - baseline) * 0.005 + random.uniform(-0.001, 0.001), 5)
                 ref.update({'last_score': current_score, 'target_yield': target_yield})
                 print(f" ✅ {ticker}: {target_yield * 100:+.2f}%")
-            except: continue
+            except Exception as e:
+                print(f" ❌ {ticker} 수집 실패: {e}")
+                continue
             finally:
+                # 종목당 간격을 좀 더 짧게 조정 (어차피 5개만 하니까 5~8초면 충분)
                 elapsed = time.time() - loop_start
-                if elapsed < 12.0: time.sleep(12.0 - elapsed)
-        print(f"🏁 수집 완료")
+                if elapsed < 8.0: time.sleep(8.0 - elapsed)
+        print(f"🏁 그룹 {group_idx} 수집 완료")
     except Exception as e:
         print(f"❌ 수집 세션 실패: {e}")
 
@@ -144,7 +173,7 @@ def initialize_app():
             ref.set({'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 'current_yield': 0.0})
 
 # ---------------------------------------------------------
-# 4. 스케줄러 설정 (수집 주기 정렬)
+# 4. 스케줄러 설정 (수정됨)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
@@ -156,24 +185,19 @@ def run_ticks():
 if __name__ == "__main__":
     initialize_app()
     
-    # [핵심] 다음 '00초' 정각 계산
     now = datetime.now(KST)
     next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     
-    # 1. 즉시 한 번 수집 실행 (백그라운드 스케줄로 등록하여 서버 부팅 지연 방지)
-    scheduler.add_job(fetch_and_update, 'date', run_date=now)
-    
-    # 2. 7분 주기 수집 (정확히 다음 00초부터 시작하도록 start_date 설정)
+    # [변경] 7분 간격이 아니라 '매 1분마다' 실행하되, 함수 내부에서 그룹을 나눠 수집
     scheduler.add_job(
         fetch_and_update, 
         'interval', 
-        minutes=7, 
-        start_date=next_sync_time, 
+        minutes=1, 
+        start_date=now, # 서버 켜자마자 첫 그룹 수집 시작
         max_instances=1, 
         coalesce=True
     )
     
-    # 3. 1분 봉 저장 (정확히 00초 정각마다)
     scheduler.add_job(
         record_minute_candle, 
         'interval', 
@@ -181,9 +205,8 @@ if __name__ == "__main__":
         start_date=next_sync_time
     )
     
-    # 4. 틱 생성 엔진 구동
     run_ticks()
     
     scheduler.start()
-    print(f"🚀 스케줄러 가동됨 (동기화 타겟: {next_sync_time.strftime('%H:%M:%00')})")
+    print(f"🚀 분산 수집 시스템 가동됨 (7분 주기로 전체 순환)")
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
