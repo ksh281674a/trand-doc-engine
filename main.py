@@ -76,7 +76,7 @@ def generate_ticks():
                 reverse_prob = 0.45 - min(0.35, abs(distance) * 10)
                 
                 if random.random() > reverse_prob:
-                    # 정방향 추세 가속도
+                    # 정방향 추세 가속도 (멀수록 강력하게 직진)
                     speed_boost = 1.8 + min(2.2, abs(distance) * 15)
                     move = ideal_step * random.uniform(speed_boost * 0.8, speed_boost * 1.2)
                 else:
@@ -159,6 +159,8 @@ def daily_reset():
 def fetch_and_update():
     now = datetime.now(KST)
     now_ts = int(time.time())
+    
+    # 7개 그룹 분할 (0~6 사이클)
     group_idx = now.minute % 7
     items_per_group = 5 
     start_idx = group_idx * items_per_group
@@ -166,10 +168,13 @@ def fetch_and_update():
     current_group_tickers = TICKER_KEYS[start_idx:end_idx]
     
     if not current_group_tickers: return
-    print(f"\n📊 [그룹 {group_idx} 수집 시작] {now.strftime('%H:%M:%S')}")
+
+    # 🌟 로그 강화: 그룹 시작 헤더
+    print(f"\n──────────────── 그룹 {group_idx} 수집 시작 ────────────────")
+    print(f"⏰ 시각: {now.strftime('%H:%M:%S')}")
+    print(f"📦 대상: {', '.join(current_group_tickers)}")
     
     try:
-        # [수정] 백오프 설정 제거
         pt = TrendReq(hl='ko-KR', tz=540)
         pt.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'
         
@@ -191,12 +196,19 @@ def fetch_and_update():
                     'target_yield': target_yield,
                     'last_update_ts': now_ts
                 })
-                print(f" ✅ {ticker}: {target_yield * 100:+.2f}% (점수: {current_score})")
-            except: continue
+                # 🌟 로그 강화: 종목별 실시간 결과 출력
+                print(f" ✅ {ticker.ljust(8)}: {target_yield * 100:+.2f}% (점수: {current_score})")
+                
+            except Exception as e:
+                print(f" ❌ {ticker.ljust(8)} 수집 실패: {e}")
+                continue
             finally:
                 elapsed = time.time() - loop_start
                 if elapsed < 11.0: time.sleep(11.0 - elapsed)
-        print(f"🏁 그룹 {group_idx} 수집 완료")
+        
+        # 🌟 로그 강화: 그룹 완료 푸터
+        print(f"──────────────── 그룹 {group_idx} 수집 완료 ────────────────")
+        
     except Exception as e:
         print(f"❌ 수집 세션 에러: {e}")
 
@@ -217,6 +229,7 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
+    # 틱 주기를 촘촘하게 하여 부드러운 움직임 확보
     next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.5, 1.1))
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
@@ -227,6 +240,7 @@ if __name__ == "__main__":
     
     print(f"📡 시스템 대기 중... 첫 정각 동기화 시각: {next_sync_time.strftime('%H:%M:%S')}")
 
+    # 1. 즉시 한 번 수집 실행 및 정각 주기 설정
     scheduler.add_job(fetch_and_update, 'date', run_date=now)
     scheduler.add_job(fetch_and_update, 'interval', minutes=1, start_date=next_sync_time, max_instances=1, coalesce=True)
     scheduler.add_job(record_minute_candle, 'interval', minutes=1, start_date=next_sync_time)
@@ -236,4 +250,6 @@ if __name__ == "__main__":
     
     run_ticks()
     scheduler.start()
+    
+    # 배포용 Flask 실행
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
