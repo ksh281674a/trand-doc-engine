@@ -6,3 +6,5 @@ apscheduler
 pandas
 pytz
 selenium
+requests
+numpy
