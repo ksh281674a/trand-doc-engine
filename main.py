@@ -93,7 +93,6 @@ def generate_ticks():
                 next_tick = round(current + move + shiver + wick_pressure, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
                 
-                # OHLC 버퍼 업데이트
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
                 else:
@@ -129,7 +128,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 수집 및 자정 리셋 로직 (🌟 추가됨)
+# 4. 수집 및 자정 리셋 로직
 # ---------------------------------------------------------
 def daily_reset():
     """매일 자정(00:00) 전날 최종 점수를 Baseline으로 설정하여 0% 리셋"""
@@ -142,7 +141,6 @@ def daily_reset():
         updates = {}
         for ticker in TICKER_KEYS:
             data = all_trends.get(ticker, {})
-            # 직전 구글 트렌드 점수를 새로운 기준점으로 설정
             last_score = data.get('last_score', TICKERS_DATA.get(ticker, 60))
             
             updates[f'{ticker}/baseline'] = last_score
@@ -150,12 +148,11 @@ def daily_reset():
             updates[f'{ticker}/current_yield'] = 0.0
             updates[f'{ticker}/last_update_ts'] = int(time.time())
 
-            # 로컬 OHLC 버퍼도 리셋 (새로운 0점 기준)
             ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
 
         if updates:
             db.reference('chart_data/trends').update(updates)
-            print("✅ 자정 리셋 완료: 모든 종목 수익률 0% 기준점 갱신")
+            print("✅ 자정 리셋 완료")
     except Exception as e:
         print(f"❌ daily_reset 에러: {e}")
 
@@ -172,7 +169,8 @@ def fetch_and_update():
     print(f"\n📊 [그룹 {group_idx} 수집 시작] {now.strftime('%H:%M:%S')}")
     
     try:
-        pt = TrendReq(hl='ko-KR', tz=540, retries=5, backoff_factor=2)
+        # [수정] 백오프 설정 제거
+        pt = TrendReq(hl='ko-KR', tz=540)
         pt.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'
         
         for ticker in current_group_tickers:
@@ -180,7 +178,6 @@ def fetch_and_update():
             try:
                 ref = db.reference(f'chart_data/trends/{ticker}')
                 data = ref.get() or {}
-                # 자정에 리셋된 baseline을 기준으로 수익률 계산
                 baseline = data.get('baseline', TICKERS_DATA.get(ticker, 60))
                 
                 pt.build_payload([ticker], timeframe='now 1-H')
@@ -230,16 +227,13 @@ if __name__ == "__main__":
     
     print(f"📡 시스템 대기 중... 첫 정각 동기화 시각: {next_sync_time.strftime('%H:%M:%S')}")
 
-    # 1. 즉시 한 번 수집 실행 및 정각 주기 설정
     scheduler.add_job(fetch_and_update, 'date', run_date=now)
     scheduler.add_job(fetch_and_update, 'interval', minutes=1, start_date=next_sync_time, max_instances=1, coalesce=True)
     scheduler.add_job(record_minute_candle, 'interval', minutes=1, start_date=next_sync_time)
     
-    # 🌟 2. 자정 리셋 스케줄러 추가 (매일 00:00:00 실행)
+    # 자정 리셋 스케줄러 (한국시간 00:00:00)
     scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
     
-    # 3. 실시간 틱 가동
     run_ticks()
-    
     scheduler.start()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
