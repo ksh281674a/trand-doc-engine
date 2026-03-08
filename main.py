@@ -23,7 +23,7 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ---------------------------------------------------------
-# 2. 34개 종목 데이터 및 OHLC 버퍼 (모두 기본점수 60점으로 통일)
+# 2. 34개 종목 데이터 및 OHLC 버퍼
 # ---------------------------------------------------------
 TICKERS_DATA = {
     "카카오": 60, "인스타그램": 60, "틱톡": 60, "X (트위터)": 60,
@@ -40,18 +40,19 @@ TICKERS_DATA = {
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (현실적인 지그재그 차트 무빙 적용)
+# 3. 데이터 엔진 (보안 규칙 준수 및 봉 생성 보장)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
-        all_trends = db.reference('chart_data/trends').get()
+        # [수정] 데이터 경로 유연성 확보 (둘 다 체크)
+        root_ref = db.reference('chart_data/trends').get()
+        legacy_ref = db.reference('trends').get()
+        all_trends = root_ref if root_ref else legacy_ref
+        
         if not all_trends:
             return
         
-        updates_trends = {}
-        updates_live = {}
-        
-        # 프론트엔드 실시간 업데이트용 현재 시간
+        updates = {}
         now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         current_ts = int(now_utc.timestamp())
         
@@ -60,31 +61,21 @@ def generate_ticks():
                 target = data.get('target_yield', 0.0)
                 current = data.get('current_yield', 0.0)
                 
-                # 목표까지 남은 거리 계산
                 distance = target - current
-                
-                # 1. 기본 견인력 (거리가 멀면 보폭이 커지고, 가까우면 좁아짐)
                 pull = distance * 0.03 
-                
-                # 2. 기본 노이즈 (잔파동)
                 noise = np.random.normal(0, 0.001)
                 
-                # 3. [현실 반영] 일방적 방향을 깨는 '지그재그(조정)' 로직
-                # 목표까지 거리가 꽤 남았을 때, 20% 확률로 가던 방향의 '반대'로 살짝 꺾임 (음봉/양봉 교차)
                 if abs(distance) > 0.002 and random.random() < 0.20:
-                    # 가야할 길의 5~15% 만큼 뒤로 후퇴
                     counter_move = -np.sign(distance) * abs(distance) * random.uniform(0.05, 0.15)
                     noise += counter_move
                 
-                # 극단적 점프 방지 (거리에 비례해 최대 허용폭 설정)
                 max_step = max(0.002, abs(distance) * 0.1)
                 noise = np.clip(noise, -max_step, max_step) 
-                
                 next_tick = round(current + pull + noise, 5)
                 
-                updates_trends[f'{ticker}/current_yield'] = next_tick
+                # 내부 연산용 및 보안 경로 업데이트
+                updates[f'chart_data/trends/{ticker}/current_yield'] = next_tick
                 
-                # OHLC 버퍼 기록
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
                 else:
@@ -92,8 +83,8 @@ def generate_ticks():
                     ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], next_tick)
                     ohlc_buffer[ticker]['close'] = next_tick
                 
-                # 프론트엔드가 차트를 그릴 수 있도록 1분봉 형태를 통째로 전달
-                updates_live[ticker] = {
+                # 실시간 OHLC 패키지 전송 (chart_data/live_data/{ticker})
+                updates[f'chart_data/live_data/{ticker}'] = {
                     'time': current_ts,
                     'open': ohlc_buffer[ticker]['open'],
                     'high': ohlc_buffer[ticker]['high'],
@@ -103,22 +94,21 @@ def generate_ticks():
                     
             except: continue
                 
-        if updates_trends:
-            db.reference('chart_data/trends').update(updates_trends)
-        if updates_live:
-            db.reference('chart_data/live_data').update(updates_live)
+        if updates:
+            db.reference('/').update(updates)
 
     except Exception as e:
-        print(f"❌ generate_ticks 실패: {e}")
+        print(f"❌ generate_ticks 에러: {e}")
 
 def record_minute_candle():
-    """매 분 00초에 버퍼의 데이터를 chart_data/chart_history에 확정 저장"""
+    """매 1분마다 버퍼 데이터를 chart_history에 push하여 과거 데이터 축적"""
     try:
         now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         ts = int(now_utc.timestamp())
         
         if not ohlc_buffer: return
 
+        save_count = 0
         for ticker in TICKERS_DATA.keys():
             candle = ohlc_buffer.get(ticker)
             if candle:
@@ -129,15 +119,18 @@ def record_minute_candle():
                     'low': candle['low'],
                     'close': candle['close']
                 })
+                # 버퍼 초기화 (다음 분 시작)
                 ohlc_buffer[ticker] = {
                     'open': candle['close'], 'high': candle['close'], 
                     'low': candle['close'], 'close': candle['close']
                 }
+                save_count += 1
+        
+        print(f"✅ [{datetime.now(KST).strftime('%H:%M:%S')}] 1분 봉 저장 완료 ({save_count}종목, TS:{ts})")
     except Exception as e:
         print(f"❌ record_minute_candle 에러: {e}")
 
 def daily_midnight_reset():
-    """자정이 되면 직전 점수를 기본점수로 업데이트하고 수익률 0% 리셋"""
     try:
         all_trends = db.reference('chart_data/trends').get()
         if not all_trends: return
@@ -151,7 +144,7 @@ def daily_midnight_reset():
         print(f"❌ 자정 리셋 실패: {e}")
 
 # ---------------------------------------------------------
-# 4. 트렌드 수집 로직 (1점 = 0.7% 및 랜덤 안착)
+# 4. 트렌드 수집 로직
 # ---------------------------------------------------------
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
@@ -180,17 +173,13 @@ def fetch_and_update():
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
             
-            # [핵심] 트렌드 1점당 0.7% (0.007) 목표로 환산
             base_target = (current_score - baseline) * 0.007
-            
-            # [핵심] 완벽히 똑같은 점수가 아니라 +-0.2% (0.002) 근처로 랜덤 수렴하도록 오프셋 추가
             convergence_offset = random.uniform(-0.002, 0.002)
             target_yield = round(base_target + convergence_offset, 5)
             
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield * 100:+.2f}%")
-        except Exception as e:
-            print(f" ❌ {ticker} 수집 실패: {e}")
+        except: continue
         finally:
             sleep_time = 12.0 - (time.time() - loop_start_time)
             if sleep_time > 0: time.sleep(sleep_time)
@@ -209,20 +198,21 @@ def initialize_app():
         print(f"❌ 초기화 실패: {e}")
 
 # ---------------------------------------------------------
-# 5. 스케줄러 설정 (랜덤 틱 로직 유지)
+# 5. 스케줄러 설정 (기능 강화)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_generate_ticks_randomly():
     generate_ticks() 
-    delay = random.uniform(0.5, 1.5) # 0.5초 ~ 1.5초 사이 랜덤 딜레이 생성
+    delay = random.uniform(0.5, 1.5)
     next_run = datetime.now(KST) + timedelta(seconds=delay)
     scheduler.add_job(run_generate_ticks_randomly, 'date', run_date=next_run)
 
-# 랜덤 틱 엔진 최초 시동
+# 엔진 시동
 run_generate_ticks_randomly()
 
-scheduler.add_job(record_minute_candle, 'cron', second=0)
+# [수정] Interval 방식으로 매 분 봉 생성 보장
+scheduler.add_job(record_minute_candle, 'interval', minutes=1, start_date=datetime.now(KST).replace(second=0, microsecond=0))
 
 now_kst = datetime.now(KST)
 next_minute = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
