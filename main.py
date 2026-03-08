@@ -48,7 +48,7 @@ TICKER_KEYS = list(TICKERS_DATA.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (역동적 추세 및 지그재그 로직)
+# 3. 데이터 엔진 (추세 Conviction & 마이크로 진동 로직)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -66,35 +66,34 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # [로직 1] 7분 선형 수렴 시간 계산
+                # [로직 1] 시간 비례 수렴 보폭 계산
                 elapsed_sec = now_ts - last_update_ts
                 remaining_sec = max(5, 420 - elapsed_sec)
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
-                # [로직 2] 확률적 추세 강화 (살아있는 리듬감)
-                # 65% 확률로 타겟 방향으로 쏘고, 35% 확률로 반대로 튀게 함 (음봉/양봉 섞기)
-                target_dir = np.sign(distance)
-                if random.random() < 0.65:
-                    # 추세 방향: 목표를 향해 힘차게 이동 (보폭 강화)
-                    move = ideal_step * random.uniform(1.5, 3.0)
+                # 수익률이 클수록 정직하게 추종, 낮을수록 지그재그
+                reverse_prob = 0.45 - min(0.35, abs(distance) * 10)
+                
+                if random.random() > reverse_prob:
+                    # 정방향 추세 가속도
+                    speed_boost = 1.8 + min(2.2, abs(distance) * 15)
+                    move = ideal_step * random.uniform(speed_boost * 0.8, speed_boost * 1.2)
                 else:
-                    # 반대 방향: 눌림목 형성 (일부러 반대로 튀기)
-                    move = -ideal_step * random.uniform(1.0, 2.0)
+                    # 역방향/눌림목
+                    move = -ideal_step * random.uniform(0.7, 1.5)
                 
-                # [로직 3] 마이크로 진동 (Anti-Quiet)
-                # 봉이 멈춰있지 않고 파르르 떨리게 만드는 고주파 노이즈
-                shiver = np.random.normal(0, 0.0009) 
+                # 마이크로 진동 (Anti-Quiet)
+                shiver = np.random.normal(0, 0.0011) 
                 
-                # [로직 4] Wick Pressure (기존 유지: 꼬리 만들기)
+                # Wick Pressure (꼬리 형성)
                 current_candle_open = ohlc_buffer.get(ticker, {}).get('open', current)
-                wick_pressure = -(current - current_candle_open) * 0.08
+                wick_pressure = -(current - current_candle_open) * 0.1
                 
-                # 최종 틱 계산
                 next_tick = round(current + move + shiver + wick_pressure, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
                 
-                # OHLC 버퍼 업데이트 (고점/저점 갱신)
+                # OHLC 버퍼 업데이트
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
                 else:
@@ -103,10 +102,8 @@ def generate_ticks():
                     ohlc_buffer[ticker]['close'] = next_tick
                 
                 updates_live[ticker] = {
-                    'time': now_ts,
-                    'open': ohlc_buffer[ticker]['open'],
-                    'high': ohlc_buffer[ticker]['high'],
-                    'low': ohlc_buffer[ticker]['low'],
+                    'time': now_ts, 'open': ohlc_buffer[ticker]['open'],
+                    'high': ohlc_buffer[ticker]['high'], 'low': ohlc_buffer[ticker]['low'],
                     'close': ohlc_buffer[ticker]['close']
                 }
             except: continue
@@ -117,7 +114,6 @@ def generate_ticks():
         print(f"❌ generate_ticks 에러: {e}")
 
 def record_minute_candle():
-    """로그 출력 없이 조용히 1분 봉 저장"""
     try:
         now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         ts = int(now_utc.timestamp())
@@ -133,12 +129,39 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 수집 로직 (기능 유지 + 정각 동기화)
+# 4. 수집 및 자정 리셋 로직 (🌟 추가됨)
 # ---------------------------------------------------------
+def daily_reset():
+    """매일 자정(00:00) 전날 최종 점수를 Baseline으로 설정하여 0% 리셋"""
+    print(f"\n🕛 [자정 리셋 시작] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+    try:
+        ref = db.reference('chart_data/trends')
+        all_trends = ref.get()
+        if not all_trends: return
+
+        updates = {}
+        for ticker in TICKER_KEYS:
+            data = all_trends.get(ticker, {})
+            # 직전 구글 트렌드 점수를 새로운 기준점으로 설정
+            last_score = data.get('last_score', TICKERS_DATA.get(ticker, 60))
+            
+            updates[f'{ticker}/baseline'] = last_score
+            updates[f'{ticker}/target_yield'] = 0.0
+            updates[f'{ticker}/current_yield'] = 0.0
+            updates[f'{ticker}/last_update_ts'] = int(time.time())
+
+            # 로컬 OHLC 버퍼도 리셋 (새로운 0점 기준)
+            ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
+
+        if updates:
+            db.reference('chart_data/trends').update(updates)
+            print("✅ 자정 리셋 완료: 모든 종목 수익률 0% 기준점 갱신")
+    except Exception as e:
+        print(f"❌ daily_reset 에러: {e}")
+
 def fetch_and_update():
     now = datetime.now(KST)
     now_ts = int(time.time())
-    
     group_idx = now.minute % 7
     items_per_group = 5 
     start_idx = group_idx * items_per_group
@@ -146,7 +169,6 @@ def fetch_and_update():
     current_group_tickers = TICKER_KEYS[start_idx:end_idx]
     
     if not current_group_tickers: return
-
     print(f"\n📊 [그룹 {group_idx} 수집 시작] {now.strftime('%H:%M:%S')}")
     
     try:
@@ -158,7 +180,8 @@ def fetch_and_update():
             try:
                 ref = db.reference(f'chart_data/trends/{ticker}')
                 data = ref.get() or {}
-                baseline = data.get('baseline', TICKERS_DATA[ticker])
+                # 자정에 리셋된 baseline을 기준으로 수익률 계산
+                baseline = data.get('baseline', TICKERS_DATA.get(ticker, 60))
                 
                 pt.build_payload([ticker], timeframe='now 1-H')
                 df = pt.interest_over_time()
@@ -172,67 +195,48 @@ def fetch_and_update():
                     'last_update_ts': now_ts
                 })
                 print(f" ✅ {ticker}: {target_yield * 100:+.2f}% (점수: {current_score})")
-                
-            except Exception as e:
-                print(f" ❌ {ticker} 수집 실패: {e}")
-                continue
+            except: continue
             finally:
                 elapsed = time.time() - loop_start
                 if elapsed < 11.0: time.sleep(11.0 - elapsed)
-        
         print(f"🏁 그룹 {group_idx} 수집 완료")
     except Exception as e:
         print(f"❌ 수집 세션 에러: {e}")
 
 def initialize_app():
-    print("🚀 Firebase 초기화 및 동기화 중...")
+    print("🚀 Firebase 초기화 중...")
     for ticker, avg in TICKERS_DATA.items():
         ref = db.reference(f'chart_data/trends/{ticker}')
         if not ref.get():
             ref.set({
-                'baseline': avg, 
-                'last_score': avg, 
-                'target_yield': 0.0, 
-                'current_yield': 0.0,
-                'last_update_ts': int(time.time())
+                'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 
+                'current_yield': 0.0, 'last_update_ts': int(time.time())
             })
 
 # ---------------------------------------------------------
-# 5. 스케줄러 설정 (정각 00초 동기화 핵심)
+# 5. 스케줄러 설정
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    # 틱 간격을 더 촘촘하게 하여 부드러움과 역동성을 동시에 확보 (0.6 ~ 1.1초)
-    next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.6, 1.1))
+    next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.5, 1.1))
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
 if __name__ == "__main__":
     initialize_app()
-    
     now = datetime.now(KST)
     next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     
     print(f"📡 시스템 대기 중... 첫 정각 동기화 시각: {next_sync_time.strftime('%H:%M:%S')}")
 
-    # 1. 정각부터 시작하는 수집 스케줄
-    scheduler.add_job(
-        fetch_and_update, 
-        'interval', 
-        minutes=1, 
-        start_date=next_sync_time,
-        max_instances=1, 
-        coalesce=True
-    )
+    # 1. 즉시 한 번 수집 실행 및 정각 주기 설정
+    scheduler.add_job(fetch_and_update, 'date', run_date=now)
+    scheduler.add_job(fetch_and_update, 'interval', minutes=1, start_date=next_sync_time, max_instances=1, coalesce=True)
+    scheduler.add_job(record_minute_candle, 'interval', minutes=1, start_date=next_sync_time)
     
-    # 2. 정각부터 시작하는 봉 저장 스케줄
-    scheduler.add_job(
-        record_minute_candle, 
-        'interval', 
-        minutes=1, 
-        start_date=next_sync_time
-    )
+    # 🌟 2. 자정 리셋 스케줄러 추가 (매일 00:00:00 실행)
+    scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
     
     # 3. 실시간 틱 가동
     run_ticks()
