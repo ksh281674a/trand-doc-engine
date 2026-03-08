@@ -40,21 +40,11 @@ TICKERS_DATA = {
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 💡 [신규 로직] 0.5초 ~ 2.0초 랜덤 스케줄러
-# ---------------------------------------------------------
-scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-
-def schedule_next_tick():
-    """다음 틱 생성 시간을 0.5초 ~ 2초 사이로 랜덤하게 예약합니다."""
-    delay = random.uniform(0.5, 2.0)
-    run_time = datetime.now(KST) + timedelta(seconds=delay)
-    scheduler.add_job(generate_ticks, 'date', run_date=run_time)
-
-# ---------------------------------------------------------
-# 3. 데이터 엔진 (꼬리 확률 감소 + 수렴 강화)
+# 3. 데이터 엔진 (보안 규칙 준수: chart_data 하위 경로 사용)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
+        # 모든 경로는 chart_data/ 하위로 제한
         all_trends = db.reference('chart_data/trends').get()
         if not all_trends:
             return
@@ -67,17 +57,14 @@ def generate_ticks():
                 target = data.get('target_yield', 0.0)
                 current = data.get('current_yield', 0.0)
                 
-                # 1. 수렴 (목표치로 당기는 힘을 15%로 상향하여 빠르게 붙게 만듦)
-                pull = (target - current) * 0.15
+                # [수정 1] 변동성(꼬리): 기본 변동성은 살려두되, 너무 극단적인 긴 꼬리가 나올 확률만 컷트
+                noise = np.random.normal(0, 0.008) # 0.012에서 0.008로 약간 낮춰서 잔파동 유지
+                noise = np.clip(noise, -0.02, 0.02) # 우연히 너무 큰 값이 나와도 +-0.02 밖으로는 안 나가게 가위질
                 
-                # 2. 랜덤 노이즈 (표준편차를 0.0005로 확 줄여서 꼬리가 길어질 확률 극감)
-                noise = np.random.normal(0, 0.0005)
+                # [수정 2] 트렌드 수렴: 목표치 근처(+-0.25)로 더 잘 따라가도록 당기는 힘을 2배로 상향
+                pull = (target - current) * 0.12 
                 
-                # 3. 극단적 변동 억제 (어떤 상황에서도 노이즈가 +- 0.0025를 넘지 못하게 가위로 자름)
-                noise = np.clip(noise, -0.0025, 0.0025)
-                
-                # 최종 가격 = 현재가 + 목표로 가는 힘 + 제한된 노이즈
-                next_tick = round(current + pull + noise, 5)
+                next_tick = round(current + noise + pull, 4)
                 
                 updates_trends[f'{ticker}/current_yield'] = next_tick
                 updates_live[f'{ticker}/current_price'] = next_tick
@@ -98,11 +85,9 @@ def generate_ticks():
 
     except Exception as e:
         print(f"❌ generate_ticks 실패: {e}")
-    finally:
-        # 이번 틱 연산이 끝나면, 다음 틱을 랜덤한 시간 뒤에 실행하도록 스스로 예약
-        schedule_next_tick()
 
 def record_minute_candle():
+    """매 분 00초에 버퍼의 데이터를 chart_data/chart_history에 확정 저장"""
     try:
         now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         ts = int(now_utc.timestamp())
@@ -192,11 +177,21 @@ def initialize_app():
         print(f"❌ 초기화 실패: {e}")
 
 # ---------------------------------------------------------
-# 5. 스케줄러 실행 세팅
+# 5. 스케줄러 설정 (랜덤 틱 로직 추가)
 # ---------------------------------------------------------
-# 기존 interval(2초) 틱 생성 스케줄러는 제거하고 랜덤 틱 호출을 시작합니다.
-schedule_next_tick()
+scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
+# [수정 3] 고정된 2초 interval 대신, 스스로 랜덤한 시간 뒤에 다시 호출하도록 감싸는 래퍼(Wrapper) 함수 생성
+def run_generate_ticks_randomly():
+    generate_ticks() # 본래 로직 실행
+    delay = random.uniform(0.5, 1.5) # 0.5초 ~ 1.5초 사이 랜덤 딜레이 생성
+    next_run = datetime.now(KST) + timedelta(seconds=delay)
+    scheduler.add_job(run_generate_ticks_randomly, 'date', run_date=next_run)
+
+# 랜덤 틱 엔진 최초 시동
+run_generate_ticks_randomly()
+
+# 나머지 스케줄러는 원본 그대로 유지
 scheduler.add_job(record_minute_candle, 'cron', second=0)
 
 now_kst = datetime.now(KST)
