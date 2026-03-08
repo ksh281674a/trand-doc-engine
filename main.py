@@ -23,28 +23,27 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ---------------------------------------------------------
-# 2. 34개 종목 데이터 및 OHLC 버퍼
+# 2. 34개 종목 데이터 및 OHLC 버퍼 (모두 기본점수 60점으로 통일)
 # ---------------------------------------------------------
 TICKERS_DATA = {
-    "카카오": 42, "인스타그램": 55, "틱톡": 48, "X (트위터)": 50,
-    "유튜브": 89, "치지직": 68, "SOOP": 52, "쿠팡": 78,
-    "알리": 74, "무신사": 65, "테무": 72, "네이버": 85,
-    "구글": 92, "다음": 35, "MS (Bing)": 28, "배달의민족": 62,
-    "쿠팡이츠": 45, "요기요": 30, "유튜브 뮤직": 58, "멜론": 52,
-    "애플뮤직": 35, "라이엇": 45, "스팀": 42, "넥슨": 48,
-    "넷플릭스": 70, "티빙": 58, "쿠팡플레이": 45, "왓챠": 25,
-    "네이버웹툰": 55, "카카오페이지": 40, "하이브": 48, "SM": 38,
-    "YG": 35, "JYP": 32
+    "카카오": 60, "인스타그램": 60, "틱톡": 60, "X (트위터)": 60,
+    "유튜브": 60, "치지직": 60, "SOOP": 60, "쿠팡": 60,
+    "알리": 60, "무신사": 60, "테무": 60, "네이버": 60,
+    "구글": 60, "다음": 60, "MS (Bing)": 60, "배달의민족": 60,
+    "쿠팡이츠": 60, "요기요": 60, "유튜브 뮤직": 60, "멜론": 60,
+    "애플뮤직": 60, "라이엇": 60, "스팀": 60, "넥슨": 60,
+    "넷플릭스": 60, "티빙": 60, "쿠팡플레이": 60, "왓챠": 60,
+    "네이버웹툰": 60, "카카오페이지": 60, "하이브": 60, "SM": 60,
+    "YG": 60, "JYP": 60
 }
 
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (보안 규칙 준수: chart_data 하위 경로 사용)
+# 3. 데이터 엔진 (현실적인 지그재그 차트 무빙 적용)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
-        # 모든 경로는 chart_data/ 하위로 제한
         all_trends = db.reference('chart_data/trends').get()
         if not all_trends:
             return
@@ -52,30 +51,55 @@ def generate_ticks():
         updates_trends = {}
         updates_live = {}
         
+        # 프론트엔드 실시간 업데이트용 현재 시간
+        now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+        current_ts = int(now_utc.timestamp())
+        
         for ticker, data in all_trends.items():
             try:
                 target = data.get('target_yield', 0.0)
                 current = data.get('current_yield', 0.0)
                 
-                # [수정 1] 1점=0.5% 스케일에 맞춘 꼬리 및 노이즈 세팅
-                # 평소엔 0.1% 내외 변동, 아주 가끔 큰 변동이 생겨도 +-0.4% 안에서 컷트하여 적당한 꼬리만 허용
-                noise = np.random.normal(0, 0.0012)
-                noise = np.clip(noise, -0.004, 0.004) 
+                # 목표까지 남은 거리 계산
+                distance = target - current
                 
-                # [수정 2] 목표 점수로 자연스럽게 수렴하도록 당기는 힘 조절 (8%씩 이동)
-                pull = (target - current) * 0.08
+                # 1. 기본 견인력 (거리가 멀면 보폭이 커지고, 가까우면 좁아짐)
+                pull = distance * 0.03 
                 
-                next_tick = round(current + noise + pull, 5)
+                # 2. 기본 노이즈 (잔파동)
+                noise = np.random.normal(0, 0.001)
+                
+                # 3. [현실 반영] 일방적 방향을 깨는 '지그재그(조정)' 로직
+                # 목표까지 거리가 꽤 남았을 때, 20% 확률로 가던 방향의 '반대'로 살짝 꺾임 (음봉/양봉 교차)
+                if abs(distance) > 0.002 and random.random() < 0.20:
+                    # 가야할 길의 5~15% 만큼 뒤로 후퇴
+                    counter_move = -np.sign(distance) * abs(distance) * random.uniform(0.05, 0.15)
+                    noise += counter_move
+                
+                # 극단적 점프 방지 (거리에 비례해 최대 허용폭 설정)
+                max_step = max(0.002, abs(distance) * 0.1)
+                noise = np.clip(noise, -max_step, max_step) 
+                
+                next_tick = round(current + pull + noise, 5)
                 
                 updates_trends[f'{ticker}/current_yield'] = next_tick
-                updates_live[f'{ticker}/current_price'] = next_tick
                 
+                # OHLC 버퍼 기록
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
                 else:
                     ohlc_buffer[ticker]['high'] = max(ohlc_buffer[ticker]['high'], next_tick)
                     ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], next_tick)
                     ohlc_buffer[ticker]['close'] = next_tick
+                
+                # 프론트엔드가 차트를 그릴 수 있도록 1분봉 형태를 통째로 전달
+                updates_live[ticker] = {
+                    'time': current_ts,
+                    'open': ohlc_buffer[ticker]['open'],
+                    'high': ohlc_buffer[ticker]['high'],
+                    'low': ohlc_buffer[ticker]['low'],
+                    'close': ohlc_buffer[ticker]['close']
+                }
                     
             except: continue
                 
@@ -113,6 +137,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 def daily_midnight_reset():
+    """자정이 되면 직전 점수를 기본점수로 업데이트하고 수익률 0% 리셋"""
     try:
         all_trends = db.reference('chart_data/trends').get()
         if not all_trends: return
@@ -126,7 +151,7 @@ def daily_midnight_reset():
         print(f"❌ 자정 리셋 실패: {e}")
 
 # ---------------------------------------------------------
-# 4. 트렌드 수집 로직
+# 4. 트렌드 수집 로직 (1점 = 0.7% 및 랜덤 안착)
 # ---------------------------------------------------------
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
@@ -155,8 +180,12 @@ def fetch_and_update():
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
             
-            # [수정 3] 구글 트렌드 1점당 0.5% (0.005)의 목표 수익률로 환산
-            target_yield = round((current_score - baseline) * 0.005, 5)
+            # [핵심] 트렌드 1점당 0.7% (0.007) 목표로 환산
+            base_target = (current_score - baseline) * 0.007
+            
+            # [핵심] 완벽히 똑같은 점수가 아니라 +-0.2% (0.002) 근처로 랜덤 수렴하도록 오프셋 추가
+            convergence_offset = random.uniform(-0.002, 0.002)
+            target_yield = round(base_target + convergence_offset, 5)
             
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield:+.2f}%")
