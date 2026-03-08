@@ -48,7 +48,7 @@ TICKER_KEYS = list(TICKERS_DATA.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (꼬리 생성 로직 포함)
+# 3. 데이터 엔진 (꼬리 생성 및 회귀 로직)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -66,25 +66,25 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # [로직 1] 7분 수렴 보폭 계산
+                # [로직 1] 7분 선형 수렴 보폭 계산
                 elapsed_sec = now_ts - last_update_ts
                 remaining_sec = max(10, 420 - elapsed_sec)
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
                 # [로직 2] 지그재그 랜덤 가중치
-                pull = ideal_step * random.uniform(0.6, 1.4)
+                pull = ideal_step * random.uniform(0.7, 1.3)
                 
-                # [로직 3] 역방향 노이즈 (출렁임)
-                noise = np.random.normal(0, 0.0003)
-                if random.random() < 0.30:
-                    noise -= pull * 1.1 
+                # [로직 3] 출렁임 노이즈
+                noise = np.random.normal(0, 0.00035)
+                if random.random() < 0.35:
+                    noise -= pull * 1.2 
 
-                # 🌟 [신규] 꼬리 만들기 로직 (Wick Pressure)
-                # 시가(Open)로부터 멀어질수록 반대 방향으로 되돌아가려는 힘을 줍니다.
+                # 🌟 [신규] 꼬리 만들기/회귀 로직 (Wick Pressure)
+                # 현재 봉의 시가(Open)를 기준으로 너무 멀어지면 시가 쪽으로 끌어당기는 힘 발생
                 current_candle_open = ohlc_buffer.get(ticker, {}).get('open', current)
-                # 시가와의 괴리율에 비례한 저항력 (0.05 계수)
-                wick_pressure = -(current - current_candle_open) * 0.05
+                # 시가와 현재가의 차이가 클수록 저항력이 강해짐 (윗꼬리/아랫꼬리 유도)
+                wick_pressure = -(current - current_candle_open) * 0.06
                 
                 next_tick = round(current + pull + noise + wick_pressure, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
@@ -112,7 +112,7 @@ def generate_ticks():
         print(f"❌ generate_ticks 에러: {e}")
 
 def record_minute_candle():
-    """로그 출력 없이 조용히 1분 봉 저장"""
+    """로그 출력 없이 1분 봉 저장"""
     try:
         now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         ts = int(now_utc.timestamp())
@@ -123,17 +123,19 @@ def record_minute_candle():
                 db.reference(f'chart_data/chart_history/{ticker}/1m').push({
                     'time': ts, 'open': candle['open'], 'high': candle['high'], 'low': candle['low'], 'close': candle['close']
                 })
+                # 다음 봉 시가를 이전 종가로 초기화
                 ohlc_buffer[ticker] = {'open': candle['close'], 'high': candle['close'], 'low': candle['close'], 'close': candle['close']}
     except Exception as e:
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 수집 로직 (로그 % 표시 수정 및 1분 내 완료 보장)
+# 4. 분산 수집 로직 (00초 정각 동기화 및 로그 강화)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
     now_ts = int(time.time())
     
+    # 7개 그룹 분할 (0~6분 사이클)
     group_idx = now.minute % 7
     items_per_group = 5 
     start_idx = group_idx * items_per_group
@@ -152,7 +154,6 @@ def fetch_and_update():
             loop_start = time.time()
             try:
                 ref = db.reference(f'chart_data/trends/{ticker}')
-                # 기존 데이터가 없으면 기본값으로 초기화
                 data = ref.get() or {}
                 baseline = data.get('baseline', TICKERS_DATA[ticker])
                 
@@ -160,29 +161,31 @@ def fetch_and_update():
                 df = pt.interest_over_time()
                 current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
                 
-                # 목표 수익률 계산 (1점당 0.5%)
-                target_yield = round((current_score - baseline) * 0.005 + random.uniform(-0.001, 0.001), 5)
+                # 수익률 계산 (1점당 0.5%)
+                target_yield = round((current_score - baseline) * 0.005 + random.uniform(-0.0005, 0.0005), 5)
                 
                 ref.update({
                     'last_score': current_score, 
                     'target_yield': target_yield,
                     'last_update_ts': now_ts
                 })
-                # 로그에 퍼센트가 항상 찍히도록 print 위치 조정
-                print(f" ✅ {ticker}: {target_yield * 100:+.2f}% (점수: {current_score})")
+                # 수집된 % 결과를 매번 확실하게 로그에 출력
+                print(f" ✅ {ticker}: {target_yield * 100:+.2f}% (현재 점수: {current_score})")
+                
             except Exception as e:
-                print(f" ❌ {ticker} 수집 실패: {e}")
+                print(f" ❌ {ticker} 수집 중 에러: {e}")
                 continue
             finally:
-                # 1분 안에 5개를 끝내기 위해 종목당 대기 시간을 9초로 고정 (9*5 = 45초)
+                # 1분(60초) 내에 5개 종목을 여유 있게 끝내기 위해 대기시간 조정 (약 10초)
                 elapsed = time.time() - loop_start
-                if elapsed < 9.0: time.sleep(9.0 - elapsed)
+                if elapsed < 10.0: time.sleep(10.0 - elapsed)
+        
         print(f"🏁 그룹 {group_idx} 수집 완료")
     except Exception as e:
-        print(f"❌ 수집 세션 실패: {e}")
+        print(f"❌ 수집 세션 전체 실패: {e}")
 
 def initialize_app():
-    print("🚀 Firebase 초기화 및 동기화...")
+    print("🚀 Firebase 초기화 및 데이터 동기화 시작...")
     for ticker, avg in TICKERS_DATA.items():
         ref = db.reference(f'chart_data/trends/{ticker}')
         if not ref.get():
@@ -195,12 +198,13 @@ def initialize_app():
             })
 
 # ---------------------------------------------------------
-# 5. 스케줄러 설정
+# 5. 스케줄러 설정 (정각 동기화 핵심)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
+    # 0.8초 ~ 1.5초 사이 랜덤 틱
     next_run = datetime.now(KST) + timedelta(seconds=random.uniform(0.8, 1.5))
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
@@ -208,12 +212,15 @@ if __name__ == "__main__":
     initialize_app()
     
     now = datetime.now(KST)
+    # 🌟 [동기화] 현재 시간 기준 다음 '00초' 정각을 첫 시작점으로 설정
     next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     
-    # 1. 즉시 한 번 수집 실행 (서버 시작 시 데이터 확보)
+    print(f"📡 시스템 대기 중... 첫 동기화 시작 시각: {next_sync_time.strftime('%H:%M:%S')}")
+
+    # 1. 즉시 한 번 수집 실행 (서버 초기 데이터 채우기용)
     scheduler.add_job(fetch_and_update, 'date', run_date=now)
     
-    # 2. 매 1분마다 그룹별 수집 (7분에 걸쳐 전체 순환)
+    # 2. 매 1분 정각(00초)마다 그룹별 수집 실행
     scheduler.add_job(
         fetch_and_update, 
         'interval', 
@@ -223,7 +230,7 @@ if __name__ == "__main__":
         coalesce=True
     )
     
-    # 3. 1분 봉 저장
+    # 3. 매 1분 정각(00초)마다 봉 저장 (로그 출력 없음)
     scheduler.add_job(
         record_minute_candle, 
         'interval', 
@@ -231,8 +238,10 @@ if __name__ == "__main__":
         start_date=next_sync_time
     )
     
-    # 4. 틱 생성 엔진 구동
+    # 4. 실시간 틱 엔진 가동
     run_ticks()
     
     scheduler.start()
+    
+    # Flask 서버 가동
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
