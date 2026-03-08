@@ -23,7 +23,7 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ---------------------------------------------------------
-# 2. 34개 종목 데이터 및 OHLC 버퍼 (추가됨)
+# 2. 34개 종목 데이터 및 OHLC 버퍼
 # ---------------------------------------------------------
 TICKERS_DATA = {
     "카카오": 42, "인스타그램": 55, "틱톡": 48, "X (트위터)": 50,
@@ -37,83 +37,91 @@ TICKERS_DATA = {
     "YG": 35, "JYP": 32
 }
 
-# 1분 봉을 만들기 위한 임시 저장소
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
 # 3. 데이터 엔진 (틱 생성 + OHLC 업데이트)
 # ---------------------------------------------------------
 def generate_ticks():
-    all_trends = db.reference('trends').get()
-    if not all_trends: return
-    
-    updates_trends = {}
-    updates_live = {}
-    
-    for ticker, data in all_trends.items():
-        try:
-            target = data.get('target_yield', 0.0)
-            current = data.get('current_yield', 0.0)
-            noise = np.random.normal(0, 0.012)
-            pull = (target - current) * 0.06
-            next_tick = round(current + (noise * 1.0) + pull, 4)
-            
-            # 1. 기존 trends 업데이트용
-            updates_trends[f'{ticker}/current_yield'] = next_tick
-            
-            # 2. 실시간 프론트엔드 연동용 (live_data)
-            updates_live[f'{ticker}/current_price'] = next_tick
-            
-            # 3. OHLC 버퍼 갱신 (고가/저가 추적)
-            if ticker not in ohlc_buffer:
-                ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
-            else:
-                ohlc_buffer[ticker]['high'] = max(ohlc_buffer[ticker]['high'], next_tick)
-                ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], next_tick)
-                ohlc_buffer[ticker]['close'] = next_tick
+    try:
+        all_trends = db.reference('trends').get()
+        if not all_trends:
+            print("⚠️ [데이터 에러] Firebase 'trends' 경로에 데이터가 없습니다.")
+            return
+        
+        updates_trends = {}
+        updates_live = {}
+        
+        for ticker, data in all_trends.items():
+            try:
+                target = data.get('target_yield', 0.0)
+                current = data.get('current_yield', 0.0)
+                noise = np.random.normal(0, 0.012)
+                pull = (target - current) * 0.06
+                next_tick = round(current + (noise * 1.0) + pull, 4)
                 
-        except:
-            continue
-            
-    if updates_trends:
-        db.reference('trends').update(updates_trends)
-    if updates_live:
-        db.reference('live_data').update(updates_live)
+                updates_trends[f'{ticker}/current_yield'] = next_tick
+                updates_live[f'{ticker}/current_price'] = next_tick
+                
+                if ticker not in ohlc_buffer:
+                    ohlc_buffer[ticker] = {'open': next_tick, 'high': next_tick, 'low': next_tick, 'close': next_tick}
+                else:
+                    ohlc_buffer[ticker]['high'] = max(ohlc_buffer[ticker]['high'], next_tick)
+                    ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], next_tick)
+                    ohlc_buffer[ticker]['close'] = next_tick
+                    
+            except Exception as e:
+                print(f"❌ [{ticker}] 틱 계산 에러: {e}")
+                continue
+                
+        if updates_trends:
+            db.reference('trends').update(updates_trends)
+        if updates_live:
+            db.reference('live_data').update(updates_live)
+
+    except Exception as e:
+        print(f"❌ [Firebase 연결 에러] generate_ticks 실패: {e}")
 
 def record_minute_candle():
-    """매 분 00초에 버퍼의 데이터를 chart_history에 확정 저장"""
-    # UTC 유닉스 타임스탬프 (초 단위 정수)
-    now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
-    ts = int(now_utc.timestamp())
-    
-    for ticker in TICKERS_DATA.keys():
-        candle = ohlc_buffer.get(ticker)
-        if candle:
-            # chart_history/{종목}/1m 경로에 push
-            db.reference(f'chart_history/{ticker}/1m').push({
-                'time': ts,
-                'open': candle['open'],
-                'high': candle['high'],
-                'low': candle['low'],
-                'close': candle['close']
-            })
-            
-            # 다음 분을 위해 초기화
-            ohlc_buffer[ticker] = {
-                'open': candle['close'], 'high': candle['close'], 
-                'low': candle['close'], 'close': candle['close']
-            }
-    print(f"📦 [봉 저장 완료] {now_utc.strftime('%H:%M:%S')} UTC")
+    """매 분 00초에 버퍼의 데이터를 chart_history에 확정 저장 (성공 로그 제거)"""
+    try:
+        now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+        ts = int(now_utc.timestamp())
+        
+        if not ohlc_buffer:
+            return # 데이터가 없으면 조용히 종료
+
+        for ticker in TICKERS_DATA.keys():
+            candle = ohlc_buffer.get(ticker)
+            if candle:
+                db.reference(f'chart_history/{ticker}/1m').push({
+                    'time': ts,
+                    'open': candle['open'],
+                    'high': candle['high'],
+                    'low': candle['low'],
+                    'close': candle['close']
+                })
+                # 버퍼 초기화
+                ohlc_buffer[ticker] = {
+                    'open': candle['close'], 'high': candle['close'], 
+                    'low': candle['close'], 'close': candle['close']
+                }
+    except Exception as e:
+        # 에러가 발생했을 때만 로그 출력
+        print(f"❌ [차트 저장 실패] chart_history/{ticker}/1m 경로 확인 필요: {e}")
 
 def daily_midnight_reset():
-    all_trends = db.reference('trends').get()
-    if not all_trends: return
-    for ticker in TICKERS_DATA.keys():
-        data = all_trends.get(ticker, {})
-        last_score = data.get('last_score', TICKERS_DATA[ticker])
-        db.reference(f'trends/{ticker}').update({
-            'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
-        })
+    try:
+        all_trends = db.reference('trends').get()
+        if not all_trends: return
+        for ticker in TICKERS_DATA.keys():
+            data = all_trends.get(ticker, {})
+            last_score = data.get('last_score', TICKERS_DATA[ticker])
+            db.reference(f'trends/{ticker}').update({
+                'baseline': last_score, 'target_yield': 0.0, 'current_yield': 0.0
+            })
+    except Exception as e:
+        print(f"❌ 자정 리셋 실패: {e}")
 
 # ---------------------------------------------------------
 # 4. 트렌드 수집 로직
@@ -131,7 +139,7 @@ def fetch_and_update():
         pt = TrendReq(hl='ko-KR', tz=540, retries=3, backoff_factor=1)
         pt.headers['User-Agent'] = random.choice(USER_AGENTS)
     except Exception as e:
-        print(f"❌ 초기 연결 실패: {e}")
+        print(f"❌ 구글 트렌드 세션 연결 실패: {e}")
         return
 
     for ticker in TICKERS_DATA.keys():
@@ -144,43 +152,41 @@ def fetch_and_update():
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
-            target_yield = (current_score - baseline) * 0.5
+            target_yield = round((current_score - baseline) * 0.5, 4)
             
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield:+.2f}%")
-        except:
-            print(f" ❌ {ticker} 오류")
+        except Exception as e:
+            print(f" ❌ {ticker} 수집 실패: {e}")
         finally:
             sleep_time = 12.0 - (time.time() - loop_start_time)
             if sleep_time > 0: time.sleep(sleep_time)
             
-    print(f"🏁 업데이트 완료")
+    print(f"🏁 트렌드 업데이트 완료")
 
 def initialize_app():
     print("🚀 Firebase 초기화 중...")
-    for ticker, avg in TICKERS_DATA.items():
-        ref = db.reference(f'trends/{ticker}')
-        if not ref.get():
-            ref.set({'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 'current_yield': 0.0})
-    print("✅ 준비 완료!")
+    try:
+        for ticker, avg in TICKERS_DATA.items():
+            ref = db.reference(f'trends/{ticker}')
+            if not ref.get():
+                ref.set({'baseline': avg, 'last_score': avg, 'target_yield': 0.0, 'current_yield': 0.0})
+        print("✅ 데이터 엔진 준비 완료!")
+    except Exception as e:
+        print(f"❌ 초기화 실패: {e}")
 
 # ---------------------------------------------------------
 # 5. 스케줄러 설정
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-# 1. 2초마다 틱 생성
 scheduler.add_job(generate_ticks, 'interval', seconds=2)
-
-# 2. 1분마다 OHLC 봉 저장 (추가된 핵심 직업)
 scheduler.add_job(record_minute_candle, 'cron', second=0)
 
-# 3. 7분마다 트렌드 수집
 now_kst = datetime.now(KST)
 next_minute = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
 scheduler.add_job(fetch_and_update, 'interval', minutes=7, next_run_time=next_minute, max_instances=1, coalesce=True)
 
-# 4. 자정 리셋
 scheduler.add_job(daily_midnight_reset, 'cron', hour=0, minute=0)
 
 if __name__ == "__main__":
