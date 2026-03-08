@@ -57,14 +57,15 @@ def generate_ticks():
                 target = data.get('target_yield', 0.0)
                 current = data.get('current_yield', 0.0)
                 
-                # [수정 1] 변동성(꼬리): 기본 변동성은 살려두되, 너무 극단적인 긴 꼬리가 나올 확률만 컷트
-                noise = np.random.normal(0, 0.008) # 0.012에서 0.008로 약간 낮춰서 잔파동 유지
-                noise = np.clip(noise, -0.02, 0.02) # 우연히 너무 큰 값이 나와도 +-0.02 밖으로는 안 나가게 가위질
+                # [수정 1] 1점=0.5% 스케일에 맞춘 꼬리 및 노이즈 세팅
+                # 평소엔 0.1% 내외 변동, 아주 가끔 큰 변동이 생겨도 +-0.4% 안에서 컷트하여 적당한 꼬리만 허용
+                noise = np.random.normal(0, 0.0012)
+                noise = np.clip(noise, -0.004, 0.004) 
                 
-                # [수정 2] 트렌드 수렴: 목표치 근처(+-0.25)로 더 잘 따라가도록 당기는 힘을 2배로 상향
-                pull = (target - current) * 0.12 
+                # [수정 2] 목표 점수로 자연스럽게 수렴하도록 당기는 힘 조절 (8%씩 이동)
+                pull = (target - current) * 0.08
                 
-                next_tick = round(current + noise + pull, 4)
+                next_tick = round(current + noise + pull, 5)
                 
                 updates_trends[f'{ticker}/current_yield'] = next_tick
                 updates_live[f'{ticker}/current_price'] = next_tick
@@ -153,7 +154,9 @@ def fetch_and_update():
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
-            target_yield = round((current_score - baseline) * 0.001, 5)
+            
+            # [수정 3] 구글 트렌드 1점당 0.5% (0.005)의 목표 수익률로 환산
+            target_yield = round((current_score - baseline) * 0.005, 5)
             
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield:+.2f}%")
@@ -177,13 +180,12 @@ def initialize_app():
         print(f"❌ 초기화 실패: {e}")
 
 # ---------------------------------------------------------
-# 5. 스케줄러 설정 (랜덤 틱 로직 추가)
+# 5. 스케줄러 설정 (랜덤 틱 로직 유지)
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-# [수정 3] 고정된 2초 interval 대신, 스스로 랜덤한 시간 뒤에 다시 호출하도록 감싸는 래퍼(Wrapper) 함수 생성
 def run_generate_ticks_randomly():
-    generate_ticks() # 본래 로직 실행
+    generate_ticks() 
     delay = random.uniform(0.5, 1.5) # 0.5초 ~ 1.5초 사이 랜덤 딜레이 생성
     next_run = datetime.now(KST) + timedelta(seconds=delay)
     scheduler.add_job(run_generate_ticks_randomly, 'date', run_date=next_run)
@@ -191,7 +193,6 @@ def run_generate_ticks_randomly():
 # 랜덤 틱 엔진 최초 시동
 run_generate_ticks_randomly()
 
-# 나머지 스케줄러는 원본 그대로 유지
 scheduler.add_job(record_minute_candle, 'cron', second=0)
 
 now_kst = datetime.now(KST)
