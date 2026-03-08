@@ -148,7 +148,7 @@ def fetch_and_update():
             pt.build_payload([ticker], timeframe='now 1-H')
             df = pt.interest_over_time()
             current_score = float(df[ticker].iloc[-1]) if not df.empty else baseline
-            target_yield = round((current_score - baseline) * 0.5, 4)
+            target_yield = round((current_score - baseline) * 0.001, 5)
             
             ref.update({'last_score': current_score, 'target_yield': target_yield})
             print(f" ✅ {ticker}: {target_yield:+.2f}%")
