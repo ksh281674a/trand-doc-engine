@@ -5,11 +5,19 @@ import random
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
-import pageviewapi # 🌟 위키피디아 API
 import firebase_admin
 from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
+
+# 🌟 [수정 1] Python 3.10+ 호환성 패치 (pageviewapi 임포트 에러 방지)
+# image_4b7135.png에서 발생한 'Mapping' 에러를 해결하기 위해 최상단에 배치합니다.
+import collections
+if not hasattr(collections, 'Mapping'):
+    import collections.abc
+    collections.Mapping = collections.abc.Mapping
+
+import pageviewapi # 패치 후에 임포트해야 정상 작동합니다.
 
 app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
@@ -30,7 +38,7 @@ except Exception as e:
     print(f"❌ Firebase 인증 실패: {e}")
 
 # ---------------------------------------------------------
-# 2. 34개 종목 및 위키피디아 매핑 (한국어 위키 기준)
+# 2. 34개 종목 및 위키피디아 매핑
 # ---------------------------------------------------------
 WIKI_MAPPING = {
     "카카오": "카카오_(기업)", "인스타그램": "인스타그램", "틱톡": "틱톡", "X (트위터)": "X_(소셜_네트워크)",
@@ -66,13 +74,13 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # 수렴 보폭 계산 (급격한 점프 방지)
+                # [수정 2] 수렴 보폭 계산 (image_9bf8c7.png 수직 찢어짐 방지)
+                # 남은 시간을 최소 60초로 넉넉히 잡아 캔들이 텔레포트하지 않게 합니다.
                 elapsed_sec = now_ts - last_update_ts
-                remaining_sec = max(30, 420 - elapsed_sec)
+                remaining_sec = max(60, 420 - elapsed_sec) 
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
-                # 추세 유지 로직 (수익률이 높을수록 직진)
                 reverse_prob = 0.45 - min(0.35, abs(distance) * 10)
                 
                 if random.random() > reverse_prob:
@@ -81,10 +89,9 @@ def generate_ticks():
                 else:
                     move = -ideal_step * random.uniform(0.7, 1.5)
                 
-                # [안정 장치] 한 번의 틱 보폭 제한 (0.2%)
-                move = np.clip(move, -0.002, 0.002)
+                # [안정 장치] 한 번의 틱 보폭 제한 (0.12%로 더 촘촘하게 제한)
+                move = np.clip(move, -0.0012, 0.0012)
                 
-                # 마이크로 진동
                 shiver = np.random.normal(0, 0.0011) 
                 
                 if ticker not in ohlc_buffer:
@@ -128,13 +135,12 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 위키피디아 수집 로직 (1분 5개 일괄 처리 / 7분 순환)
+# 4. 위키피디아 수집 (1분 5개 일괄 처리 / 7분 순환)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
     now_ts = int(time.time())
     
-    # 7분 주기 그룹 인덱싱 (0~6)
     group_idx = now.minute % 7
     start_idx = group_idx * 5
     end_idx = min(start_idx + 5, 34)
@@ -143,26 +149,22 @@ def fetch_and_update():
     if not current_group_tickers: return
 
     print(f"\n──────────────── 그룹 {group_idx} 위키 수집 시작 ────────────────")
-    
-    # 어제 날짜 계산 (위키피디아 조회수는 전날 데이터가 가장 최신 안정적임)
     target_date = (now - timedelta(days=1)).strftime('%Y%m%d')
     
     for ticker in current_group_tickers:
         try:
             wiki_title = WIKI_MAPPING[ticker]
-            # 위키피디아 페이지뷰 호출 (ko.wikipedia 기준)
             res = pageviewapi.period.sum_per_article('ko.wikipedia', wiki_title, target_date, target_date)
-            current_score = res[wiki_title] # 해당 날짜의 총 조회수
+            current_score = res[wiki_title]
             
             ref = db.reference(f'chart_data/trends/{ticker}')
             data = ref.get() or {}
             
-            # [동적 점수 반영] baseline이 0이면 첫 수집값을 기준으로 설정
+            # [동적 점수 반영] baseline이 0이면 첫 수집값을 기준으로 즉시 설정
             baseline = data.get('baseline', 0)
             if baseline == 0:
                 baseline = current_score
             
-            # 수익률 계산 (조회수 변화에 따른 가중치 조정 0.005 -> 0.01 등 조절 가능)
             target_yield = round((current_score - baseline) * 0.005 + random.uniform(-0.0005, 0.0005), 5)
             
             ref.update({
@@ -172,9 +174,7 @@ def fetch_and_update():
                 'last_update_ts': now_ts
             })
             print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (조회수: {current_score})")
-            
-            # 5개 종목을 "한 번에" 수집하기 위해 아주 짧은 대기만 가짐
-            time.sleep(0.5)
+            time.sleep(0.1) # 1분에 5개를 빠르게 수집하기 위해 대기 시간 단축
             
         except Exception as e:
             print(f" ❌ {ticker.ljust(10)} 위키 수집 실패: {e}")
@@ -183,7 +183,6 @@ def fetch_and_update():
     print(f"──────────────── 그룹 {group_idx} 수집 완료 ────────────────")
 
 def daily_reset():
-    """자정 리셋: 전날 마지막 조회수를 오늘의 기준으로 삼음"""
     print(f"\n🕛 [자정 리셋] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
     try:
         ref = db.reference('chart_data/trends')
@@ -212,13 +211,13 @@ def initialize_app():
             })
 
 # ---------------------------------------------------------
-# 5. 스케줄러 설정 (0.5~1.5s 랜덤 주기)
+# 5. 스케줄러 설정
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    # 🌟 위아래로 들썩이는 주기를 0.5초 ~ 1.5초 사이로 무작위 설정
+    # 🌟 랜덤 들썩임 주기 (0.5초 ~ 1.5초)
     next_run_delay = random.uniform(0.5, 1.5)
     next_run = datetime.now(KST) + timedelta(seconds=next_run_delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
@@ -230,13 +229,10 @@ if __name__ == "__main__":
     
     print(f"📡 대기 중... 첫 정각(00초) 수집 시작 시각: {next_sync_time.strftime('%H:%M:%S')}")
 
-    # 정각 주기 설정 (00초 동기화)
     scheduler.add_job(fetch_and_update, 'interval', minutes=1, start_date=next_sync_time, max_instances=1, coalesce=True)
     scheduler.add_job(record_minute_candle, 'interval', minutes=1, start_date=next_sync_time)
     scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
     
-    # 실시간 틱 가동
     run_ticks()
-    
     scheduler.start()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
