@@ -10,12 +10,14 @@ from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 
-# 🌟 [수정 1] Python 3.10+ 호환성 패치 (pageviewapi 임포트 에러 방지)
-# image_4b7135.png에서 발생한 'Mapping' 에러를 해결하기 위해 최상단에 배치합니다.
+# 🌟 [완벽 수정] Python 3.10+ 호환성 패치 (pageviewapi 임포트 에러 방지)
+# 'Mapping' 뿐만 아니라 새롭게 발생한 'MutableMapping', 'Sequence' 에러까지 한 번에 묶어서 해결합니다.
 import collections
 if not hasattr(collections, 'Mapping'):
     import collections.abc
     collections.Mapping = collections.abc.Mapping
+    collections.MutableMapping = collections.abc.MutableMapping
+    collections.Sequence = collections.abc.Sequence
 
 import pageviewapi # 패치 후에 임포트해야 정상 작동합니다.
 
@@ -74,7 +76,7 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # [수정 2] 수렴 보폭 계산 (image_9bf8c7.png 수직 찢어짐 방지)
+                # 수렴 보폭 계산 (image_9bf8c7.png 수직 찢어짐 방지)
                 # 남은 시간을 최소 60초로 넉넉히 잡아 캔들이 텔레포트하지 않게 합니다.
                 elapsed_sec = now_ts - last_update_ts
                 remaining_sec = max(60, 420 - elapsed_sec) 
