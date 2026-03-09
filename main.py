@@ -171,7 +171,7 @@ def fetch_and_update():
     now_kst = datetime.now(KST)
 
     print(f"\n{'─'*52}")
-    print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 34개 전체 수집 시작")
+    print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 34개 수집 시작")
     print(f"{'─'*52}")
 
     headers = {
@@ -179,58 +179,36 @@ def fetch_and_update():
         "X-Naver-Client-Secret": "6tgdSvlfjA"
     }
 
-    # 합산할 검색 API 목록 (검색 권한 하나로 전부 사용 가능)
-    SEARCH_APIS = [
-        ("뉴스",   "https://openapi.naver.com/v1/search/news.json",        "sort=date"),
-        ("블로그", "https://openapi.naver.com/v1/search/blog.json",        "sort=date"),
-        ("카페",   "https://openapi.naver.com/v1/search/cafearticle.json", "sort=date"),
-        ("웹문서", "https://openapi.naver.com/v1/search/webkr.json",       ""),
-    ]
+    # Firebase에서 전체 trends 한번에 읽기 (개별 ref.get() 34번 → 1번으로 줄임)
+    all_trends = db.reference('chart_data/trends').get() or {}
+    updates_db = {}
 
     success, fail = 0, 0
 
     for ticker in TICKER_KEYS:
         try:
             query = urllib.parse.quote(SEARCH_MAPPING[ticker])
-            current_score = 0.0
-            api_results = []
+            url   = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=1&sort=date"
+            resp  = requests.get(url, headers=headers, timeout=5)
 
-            for api_name, api_url, extra_params in SEARCH_APIS:
-                try:
-                    params = f"?query={query}&display=1"
-                    if extra_params:
-                        params += f"&{extra_params}"
-                    resp = requests.get(api_url + params, headers=headers, timeout=5)
-                    if resp.status_code == 200:
-                        total = float(resp.json().get('total', 0))
-                        current_score += total
-                        api_results.append(f"{api_name}:{int(total):,}")
-                    else:
-                        api_results.append(f"{api_name}:err{resp.status_code}")
-                    time.sleep(0.05)
-                except Exception:
-                    api_results.append(f"{api_name}:timeout")
-
-            if current_score == 0:
-                print(f" ❌ {ticker.ljust(10)} 전체 API 실패")
+            if resp.status_code != 200:
+                print(f" ❌ {ticker.ljust(10)} API 에러: {resp.status_code}")
                 fail += 1
                 continue
 
-            current_score = float(current_score)
-
-            ref  = db.reference(f'chart_data/trends/{ticker}')
-            data = ref.get() or {}
-            baseline = data.get('baseline', 0)
+            current_score = float(resp.json().get('total', 0))
+            data          = all_trends.get(ticker, {})
+            baseline      = data.get('baseline', 0)
 
             if baseline == 0:
-                ref.update({
+                updates_db[ticker] = {
                     'baseline':       current_score,
                     'last_score':     current_score,
                     'target_yield':   0.0,
+                    'current_yield':  data.get('current_yield', 0.0),
                     'last_update_ts': now_ts
-                })
+                }
                 print(f" 🔄 {ticker.ljust(10)}: 최초 세팅 ({int(current_score):,}건)")
-                time.sleep(0.08)
                 success += 1
                 continue
 
@@ -245,26 +223,30 @@ def fetch_and_update():
 
             target_yield = float(np.clip(target_yield, -0.25, 0.25))
 
-            ref.update({
+            updates_db[ticker] = {
                 'baseline':       current_score,
                 'last_score':     current_score,
                 'target_yield':   target_yield,
-                'last_update_ts': now_ts          # 10분 수렴 타이머 리셋
-            })
+                'current_yield':  data.get('current_yield', 0.0),
+                'last_update_ts': now_ts
+            }
 
             print(
                 f" ✅ {ticker.ljust(10)}: {target_yield * 100:>+6.2f}%"
-                f"  (전:{int(baseline):,} -> 현:{int(current_score):,} | 증감:{int(diff):+}건) [{" ".join(api_results)}]"
+                f"  (전:{int(baseline):,} -> 현:{int(current_score):,} | 증감:{int(diff):+}건)"
             )
-            time.sleep(0.08)   # 34건 × 0.08s ≈ 2.7초
             success += 1
 
         except Exception as e:
             print(f" ❌ {ticker.ljust(10)} 실패: {e}")
             fail += 1
 
+    # Firebase 업데이트 한번에 처리
+    if updates_db:
+        db.reference('chart_data/trends').update(updates_db)
+
     print(f"{'─'*52}")
-    print(f"✔ 완료: 성공 {success} / 실패 {fail}")
+    print(f"✔ 완료: 성공 {success} / 실패 {fail}  ({int(time.time()-now_ts)}초 소요)")
     print(f"{'─'*52}\n")
 
 
