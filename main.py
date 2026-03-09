@@ -10,8 +10,7 @@ from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 
-# 🌟 [완벽 수정] Python 3.10+ 호환성 패치 (pageviewapi 임포트 에러 방지)
-# 'Mapping' 뿐만 아니라 새롭게 발생한 'MutableMapping', 'Sequence' 에러까지 한 번에 묶어서 해결합니다.
+# 🌟 Python 3.10+ 호환성 패치 (유지)
 import collections
 if not hasattr(collections, 'Mapping'):
     import collections.abc
@@ -19,7 +18,7 @@ if not hasattr(collections, 'Mapping'):
     collections.MutableMapping = collections.abc.MutableMapping
     collections.Sequence = collections.abc.Sequence
 
-import pageviewapi # 패치 후에 임포트해야 정상 작동합니다.
+import pageviewapi 
 
 app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
@@ -76,8 +75,6 @@ def generate_ticks():
                 current = data.get('current_yield', 0.0)
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
-                # 수렴 보폭 계산 (image_9bf8c7.png 수직 찢어짐 방지)
-                # 남은 시간을 최소 60초로 넉넉히 잡아 캔들이 텔레포트하지 않게 합니다.
                 elapsed_sec = now_ts - last_update_ts
                 remaining_sec = max(60, 420 - elapsed_sec) 
                 distance = target - current
@@ -91,7 +88,7 @@ def generate_ticks():
                 else:
                     move = -ideal_step * random.uniform(0.7, 1.5)
                 
-                # [안정 장치] 한 번의 틱 보폭 제한 (0.12%로 더 촘촘하게 제한)
+                # 보폭 제한
                 move = np.clip(move, -0.0012, 0.0012)
                 
                 shiver = np.random.normal(0, 0.0011) 
@@ -137,7 +134,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 위키피디아 수집 (1분 5개 일괄 처리 / 7분 순환)
+# 4. 위키피디아 수집 로직 (바꿀 것만 정확히 수정)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -156,13 +153,19 @@ def fetch_and_update():
     for ticker in current_group_tickers:
         try:
             wiki_title = WIKI_MAPPING[ticker]
-            res = pageviewapi.period.sum_per_article('ko.wikipedia', wiki_title, target_date, target_date)
-            current_score = res[wiki_title]
+            
+            # 🌟 [에러 완벽 수정] 올바른 pageviewapi 함수와 응답 처리
+            res = pageviewapi.per_article('ko.wikipedia', wiki_title, target_date, target_date, access='all-access', agent='all-agents', granularity='daily')
+            
+            # API 응답 구조 (res['items'][0]['views'])에서 조회수를 빼옵니다.
+            if 'items' in res and len(res['items']) > 0:
+                current_score = float(res['items'][0]['views'])
+            else:
+                current_score = 0.0
             
             ref = db.reference(f'chart_data/trends/{ticker}')
             data = ref.get() or {}
             
-            # [동적 점수 반영] baseline이 0이면 첫 수집값을 기준으로 즉시 설정
             baseline = data.get('baseline', 0)
             if baseline == 0:
                 baseline = current_score
@@ -175,8 +178,8 @@ def fetch_and_update():
                 'target_yield': target_yield,
                 'last_update_ts': now_ts
             })
-            print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (조회수: {current_score})")
-            time.sleep(0.1) # 1분에 5개를 빠르게 수집하기 위해 대기 시간 단축
+            print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (조회수: {int(current_score)})")
+            time.sleep(0.1) 
             
         except Exception as e:
             print(f" ❌ {ticker.ljust(10)} 위키 수집 실패: {e}")
@@ -219,7 +222,6 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    # 🌟 랜덤 들썩임 주기 (0.5초 ~ 1.5초)
     next_run_delay = random.uniform(0.5, 1.5)
     next_run = datetime.now(KST) + timedelta(seconds=next_run_delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
