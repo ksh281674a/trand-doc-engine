@@ -1,6 +1,7 @@
 flask
 firebase-admin
 apscheduler
+requests
 numpy
 pytz
-requests
+pytrends
