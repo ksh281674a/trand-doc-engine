@@ -177,21 +177,44 @@ def fetch_and_update():
         "X-Naver-Client-Secret": "6tgdSvlfjA"
     }
 
+    # 합산할 검색 API 목록 (검색 권한 하나로 전부 사용 가능)
+    SEARCH_APIS = [
+        ("뉴스",   "https://openapi.naver.com/v1/search/news.json",        "sort=date"),
+        ("블로그", "https://openapi.naver.com/v1/search/blog.json",        "sort=date"),
+        ("카페",   "https://openapi.naver.com/v1/search/cafearticle.json", "sort=date"),
+        ("웹문서", "https://openapi.naver.com/v1/search/webkr.json",       ""),
+    ]
+
     success, fail = 0, 0
 
     for ticker in TICKER_KEYS:
         try:
-            url = (
-                f"https://openapi.naver.com/v1/search/blog.json"
-                f"?query={urllib.parse.quote(SEARCH_MAPPING[ticker])}&display=1"
-            )
-            response = requests.get(url, headers=headers, timeout=5)
-            if response.status_code != 200:
-                print(f" ❌ {ticker.ljust(10)} API 에러: {response.status_code}")
+            query = urllib.parse.quote(SEARCH_MAPPING[ticker])
+            current_score = 0.0
+            api_results = []
+
+            for api_name, api_url, extra_params in SEARCH_APIS:
+                try:
+                    params = f"?query={query}&display=1"
+                    if extra_params:
+                        params += f"&{extra_params}"
+                    resp = requests.get(api_url + params, headers=headers, timeout=5)
+                    if resp.status_code == 200:
+                        total = float(resp.json().get('total', 0))
+                        current_score += total
+                        api_results.append(f"{api_name}:{int(total):,}")
+                    else:
+                        api_results.append(f"{api_name}:err{resp.status_code}")
+                    time.sleep(0.05)
+                except Exception:
+                    api_results.append(f"{api_name}:timeout")
+
+            if current_score == 0:
+                print(f" ❌ {ticker.ljust(10)} 전체 API 실패")
                 fail += 1
                 continue
 
-            current_score = float(response.json().get('total', 0))
+            current_score = float(current_score)
 
             ref  = db.reference(f'chart_data/trends/{ticker}')
             data = ref.get() or {}
@@ -229,7 +252,7 @@ def fetch_and_update():
 
             print(
                 f" ✅ {ticker.ljust(10)}: {target_yield * 100:>+6.2f}%"
-                f"  (전:{int(baseline):,} → 현:{int(current_score):,} | Δ{int(diff):+}건)"
+                f"  (전:{int(baseline):,} -> 현:{int(current_score):,} | 증감:{int(diff):+}건) [{" ".join(api_results)}]"
             )
             time.sleep(0.08)   # 34건 × 0.08s ≈ 2.7초
             success += 1
@@ -298,16 +321,23 @@ def run_ticks():
 
 def fetch_once_then_schedule_10min():
     """
-    1분 뒤 1회 수집 후, 이후부터 10분 간격으로 전환
-    흐름: 시작즉시수집 → 1분뒤수집 → 10분마다수집(반복)
+    1분 뒤 1회 수집 후, 다음 10분 정각부터 10분 간격으로 전환
+    예) 16:32에 끝나면 → 다음 수집은 17:00 (다음 10분 정각)
     """
     fetch_and_update()
     now = datetime.now(KST)
-    next_10min = now + timedelta(minutes=10)
-    print(f"📡 이후 10분 간격 수집. 다음 예정: {next_10min.strftime('%H:%M:%S')}")
+
+    # 다음 10분 정각 계산 (분을 10분 단위로 올림)
+    next_10min_minute = ((now.minute // 10) + 1) * 10
+    if next_10min_minute >= 60:
+        next_sync = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    else:
+        next_sync = now.replace(minute=next_10min_minute, second=0, microsecond=0)
+
+    print(f"📡 다음 10분 정각 수집 예정: {next_sync.strftime('%H:%M:%S')}")
     scheduler.add_job(
-        fetch_and_update, 'interval', minutes=10,
-        start_date=next_10min, max_instances=1, coalesce=True,
+        fetch_and_update, 'cron', minute='0,10,20,30,40,50',
+        start_date=next_sync, max_instances=1, coalesce=True,
         id='fetch_10min'
     )
 
