@@ -4,4 +4,3 @@ apscheduler
 requests
 numpy
 pytz
-pytrends
