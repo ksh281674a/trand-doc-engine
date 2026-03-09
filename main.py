@@ -299,9 +299,14 @@ def run_ticks():
 if __name__ == "__main__":
     initialize_app()
 
+    # 시작 즉시 첫 수집 실행
+    print("📡 첫 수집 즉시 시작...")
+    fetch_and_update()
+
+    # 이후 다음 정각부터 1분 간격으로 반복
     now            = datetime.now(KST)
     next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-    print(f"📡 첫 정각 수집 예정: {next_sync_time.strftime('%H:%M:%S')}")
+    print(f"📡 다음 정각 수집 예정: {next_sync_time.strftime('%H:%M:%S')}")
 
     scheduler.add_job(
         fetch_and_update, 'interval', minutes=1,
