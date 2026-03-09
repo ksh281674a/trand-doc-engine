@@ -188,7 +188,7 @@ def fetch_and_update():
     for ticker in TICKER_KEYS:
         try:
             query = urllib.parse.quote(SEARCH_MAPPING[ticker])
-            url   = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=1&sort=date"
+            url   = f"https://openapi.naver.com/v1/search/blog.json?query={query}&display=1&sort=date"
             resp  = requests.get(url, headers=headers, timeout=5)
 
             if resp.status_code != 200:
@@ -327,14 +327,14 @@ if __name__ == "__main__":
     print(f"📡 [1] 첫 수집 예정:   {first_sync.strftime('%H:%M:%S')}")
     print(f"📡 [2] 두번째 수집 예정: {second_sync.strftime('%H:%M:%S')}")
 
-    # 두번째 수집 후 → 10분 정각마다 반복 등록
+    # 두번째 수집 후 → second_sync 기준 +10분마다 반복
     def second_fetch_then_schedule():
         fetch_and_update()
-        third_sync = next_10min_mark(datetime.now(KST))
-        print(f"📡 [3~] 이후 10분 정각 수집: {third_sync.strftime('%H:%M:%S')}")
+        # second_sync 시각 기준으로 +10분, +20분 ... 계산
+        third_sync = second_sync + timedelta(minutes=10)
+        print(f"📡 [3~] 이후 10분 간격 수집: {third_sync.strftime('%H:%M:%S')} 부터")
         scheduler.add_job(
-            fetch_and_update, 'cron',
-            minute='0,10,20,30,40,50', second=0,
+            fetch_and_update, 'interval', minutes=10,
             start_date=third_sync,
             max_instances=1, coalesce=True,
             id='fetch_10min'
