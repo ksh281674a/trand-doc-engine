@@ -44,22 +44,13 @@ SEARCH_MAPPING = {
     "YG": "YG엔터테인먼트", "JYP": "JYP엔터테인먼트"
 }
 
-TICKER_KEYS    = list(SEARCH_MAPPING.keys())
-ohlc_buffer    = {}   # 현재 진행 중인 분봉 OHLC
-tick_state     = {}   # 틱 방향 상태
-candle_snapshot = {}  # :57초에 찍는 봉 마감 스냅샷
-fetch_count    = 0    # 수집 횟수 카운터
+TICKER_KEYS     = list(SEARCH_MAPPING.keys())
+ohlc_buffer     = {}
+tick_state      = {}
+candle_snapshot = {}   # :57초 봉 마감 스냅샷
 
 # ---------------------------------------------------------
-# 3. 유틸
-# ---------------------------------------------------------
-def next_minute_mark(dt: datetime) -> datetime:
-    """dt 이후 첫 번째 분 정각(KST)"""
-    return (dt + timedelta(minutes=1)).replace(second=0, microsecond=0)
-
-
-# ---------------------------------------------------------
-# 4. 틱 엔진 (0.5 ~ 1.0 초 랜덤 간격)
+# 3. 틱 엔진  ★ 수정: 수렴 속도 / 오르락내리락 / 일방통행 방지
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -76,7 +67,6 @@ def generate_ticks():
             try:
                 target = data.get('target_yield', 0.0)
 
-                # ohlc_buffer 우선 사용 (Firebase sync 지연 무시)
                 if ticker in ohlc_buffer:
                     current = ohlc_buffer[ticker]['close']
                 else:
@@ -86,64 +76,59 @@ def generate_ticks():
                         'low':  current, 'close': current
                     }
 
-                # ★ 올바른 거리 계산: target - current
-                #   예) current=10%, target=2% → distance=-8% (하락 수렴)
                 distance  = target - current
                 abs_dist  = abs(distance)
 
-                last_update_ts  = data.get('last_update_ts', now_ts - 600)
-                elapsed_sec     = now_ts - last_update_ts
-                remaining_sec   = max(5, 600 - elapsed_sec)
+                last_update_ts = data.get('last_update_ts', now_ts - 600)
+                elapsed_sec    = now_ts - last_update_ts
+                remaining_sec  = max(5, 600 - elapsed_sec)
 
-                # 수렴: 10분 전체를 쓰도록 ideal_step 작게 유지
-                # 초반엔 천천히, 후반엔 조금 빠르게 (자연스러운 수렴)
+                # ★ 수렴 강도: 초반 느리게, 후반 조금 빠르게 (전체 10분 사용)
                 convergence_ratio    = min(1.0, elapsed_sec / 600)
-                convergence_strength = 0.08 + convergence_ratio * 0.10  # 0.08 ~ 0.18 (매우 느린 수렴)
+                convergence_strength = 0.15 + convergence_ratio * 0.25   # 0.15 ~ 0.40
                 ideal_step           = (distance / remaining_sec) * convergence_strength
 
-                # ★ target 0.3% 이내 = "수렴 근처" → 양봉/음봉 균형 유지
-                near_target = abs_dist < 0.003
-
-                # --- 방향 결정 ---
+                # ★ 방향 결정: 오르락내리락 강화, 일방통행 방지
                 state   = tick_state.get(ticker, {'counter': 0, 'dir': 1})
                 counter = state['counter']
                 cur_dir = state['dir']
 
                 if counter <= 0:
                     rand = random.random()
-                    if near_target:
-                        # 수렴 근처: 50/50 양봉·음봉 혼합
+
+                    # 수렴 근처(0.2% 이내): 50/50 진동
+                    if abs_dist < 0.002:
                         cur_dir = 1 if rand < 0.50 else -1
                         counter = random.randint(1, 2)
                     else:
-                        # 목표 방향 60% 우세, 역방향 40%
+                        # 목표 방향 55% (원본 58%보다 낮춤 → 역방향 더 자주)
                         if distance > 0:
-                            cur_dir = 1 if rand < 0.60 else -1
+                            cur_dir = 1 if rand < 0.55 else -1
                         elif distance < 0:
-                            cur_dir = -1 if rand < 0.60 else 1
+                            cur_dir = -1 if rand < 0.55 else 1
                         else:
                             cur_dir = 1 if rand < 0.50 else -1
 
-                        # 주 방향이면 1~3틱 유지, 역방향이면 1틱만
+                        # 주 방향 1~3틱, 역방향도 1~2틱 (오르락내리락 강화)
                         same_dir = (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0)
-                        counter  = random.randint(1, 3) if same_dir else 1
+                        counter  = random.randint(1, 3) if same_dir else random.randint(1, 2)
 
                     tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                # --- 이동량 계산 ---
-                volatility = 0.00060 + abs_dist * 0.008
+                # ★ 이동량: 봉 하나가 너무 길지 않도록 max_step 조절
+                volatility = 0.00080 + abs_dist * 0.015
 
-                if near_target:
-                    # 수렴 근처: 작은 랜덤 진동
-                    move = cur_dir * abs(np.random.normal(0, volatility * 1.5))
+                if abs_dist < 0.002:
+                    # 수렴 근처: 작은 진동
+                    move = cur_dir * abs(np.random.normal(0, volatility * 1.8))
                 else:
-                    base = abs(ideal_step) * random.uniform(0.5, 1.0)
-                    move = cur_dir * base + np.random.normal(0, volatility * 0.4)
+                    base = abs(ideal_step) * random.uniform(1.2, 2.5)
+                    move = cur_dir * base + np.random.normal(0, volatility * 0.5)
 
-                # 최대 이동폭 제한
-                max_step = max(0.0005, abs_dist * 0.04)
+                # ★ max_step: abs_dist * 0.006 → 600틱(10분)에 걸쳐 자연 수렴
+                max_step = max(0.00015, abs_dist * 0.006)
                 move     = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
@@ -156,10 +141,10 @@ def generate_ticks():
                 next_tick = round(current + move, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
 
-                buf         = ohlc_buffer[ticker]
-                buf['high'] = max(buf['high'],  next_tick)
-                buf['low']  = min(buf['low'],   next_tick)
-                buf['close']= next_tick
+                buf          = ohlc_buffer[ticker]
+                buf['high']  = max(buf['high'],  next_tick)
+                buf['low']   = min(buf['low'],   next_tick)
+                buf['close'] = next_tick
 
                 updates_live[ticker] = {
                     'time':  now_ts,
@@ -179,57 +164,41 @@ def generate_ticks():
         print(f"generate_ticks 에러: {e}")
 
 
-def run_ticks():
-    """0.5 ~ 1.0 초 랜덤 간격으로 틱 반복"""
-    generate_ticks()
-    delay    = random.uniform(0.5, 1.0)
-    next_run = datetime.now(KST) + timedelta(seconds=delay)
-    scheduler.add_job(run_ticks, 'date', run_date=next_run)
-
-
 # ---------------------------------------------------------
-# 5. 봉 마감 처리
-#    :57초 → 스냅샷 저장
-#    :00초 → 스냅샷으로 분봉 기록 후 새 봉 시작(스냅샷 close 값)
+# 4. 봉 마감: :57초 스냅샷 → :00초 분봉 저장  ★ 신규
 # ---------------------------------------------------------
 def take_candle_snapshot():
-    """매 분 :57초 호출 — 현재 OHLC를 스냅샷으로 저장"""
+    """매 분 :57초 — 현재 OHLC 스냅샷 저장"""
     for ticker in TICKER_KEYS:
         buf = ohlc_buffer.get(ticker)
         if buf:
             candle_snapshot[ticker] = {
-                'open':  buf['open'],
-                'high':  buf['high'],
-                'low':   buf['low'],
-                'close': buf['close']
+                'open': buf['open'], 'high': buf['high'],
+                'low':  buf['low'],  'close': buf['close']
             }
-    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] ▶ 봉 스냅샷 저장 ({len(candle_snapshot)}개)")
 
 
 def record_minute_candle():
-    """매 분 :00초 호출 — :57 스냅샷으로 분봉 저장, 새 봉은 스냅샷 close 에서 시작"""
+    """매 분 :00초 — 스냅샷으로 분봉 저장, 새 봉은 스냅샷 close 에서 정확히 시작"""
     try:
-        now_utc  = datetime.now(pytz.utc).replace(second=0, microsecond=0)
-        candle_ts = int(now_utc.timestamp()) - 60  # 직전 분의 타임스탬프
-
+        now_utc   = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+        candle_ts = int(now_utc.timestamp()) - 60
         current_updates = {}
 
         for ticker in TICKER_KEYS:
-            # :57 스냅샷 우선, 없으면 현재 buffer
             candle = candle_snapshot.get(ticker) or ohlc_buffer.get(ticker)
             if not candle:
                 continue
 
             close_price = candle['close']
 
-            # 분봉 히스토리 저장
             db.reference(f'chart_data/chart_history/{ticker}/1m').push({
                 'time':  candle_ts,
                 'open':  candle['open'], 'high': candle['high'],
                 'low':   candle['low'],  'close': close_price
             })
 
-            # ★ 새 봉은 정확히 스냅샷 close 에서 시작
+            # 새 봉은 스냅샷 close 에서 정확히 시작
             ohlc_buffer[ticker] = {
                 'open':  close_price, 'high': close_price,
                 'low':   close_price, 'close': close_price
@@ -242,25 +211,19 @@ def record_minute_candle():
         if current_updates:
             db.reference('chart_data/trends').update(current_updates)
 
-        print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] ▶ 분봉 저장 완료")
-
     except Exception as e:
         print(f"record_minute_candle 에러: {e}")
 
 
 # ---------------------------------------------------------
-# 6. 네이버 수집
+# 5. 네이버 수집  ★ 오버슈트 클램핑 추가
 # ---------------------------------------------------------
 def fetch_and_update():
-    global fetch_count
-    fetch_count += 1
-    current_count = fetch_count
-
     now_ts  = int(time.time())
     now_kst = datetime.now(KST)
 
     print(f"\n{'─'*52}")
-    print(f"[{now_kst.strftime('%H:%M:%S')}] {current_count}차 수집 시작 (34개)")
+    print(f"[{now_kst.strftime('%H:%M:%S')}] 34개 수집 시작")
     print(f"{'─'*52}")
 
     headers = {
@@ -268,8 +231,8 @@ def fetch_and_update():
         "X-Naver-Client-Secret": "6tgdSvlfjA"
     }
 
-    all_trends  = db.reference('chart_data/trends').get() or {}
-    updates_db  = {}
+    all_trends = db.reference('chart_data/trends').get() or {}
+    updates_db = {}
     success, fail = 0, 0
 
     for ticker in TICKER_KEYS:
@@ -305,20 +268,26 @@ def fetch_and_update():
             if diff == 0:
                 target_yield = random.choice([1, -1]) * random.uniform(0.001, 0.0015)
             else:
-                sign         = 1 if diff > 0 else -1
-                base         = random.uniform(0.001, 0.002)
-                log_val      = np.log1p(abs(diff)) * 0.018
+                sign    = 1 if diff > 0 else -1
+                base    = random.uniform(0.001, 0.002)
+                log_val = np.log1p(abs(diff)) * 0.018
                 target_yield = sign * (base + log_val)
 
             target_yield = float(np.clip(target_yield, -0.30, 0.30))
 
-            # target_yield 업데이트 (current_yield는 틱 엔진이 수렴)
-            # ohlc_buffer의 current close 값을 기준으로 수렴 시작 보장
+            # ★ 현재 위치가 새 target을 이미 넘었으면 target으로 클램핑
             current_now = ohlc_buffer.get(ticker, {}).get('close', data.get('current_yield', 0.0))
+            if (target_yield >= 0 and current_now > target_yield) or \
+               (target_yield < 0 and current_now < target_yield):
+                current_now = target_yield
+                if ticker in ohlc_buffer:
+                    for k in ('open', 'high', 'low', 'close'):
+                        ohlc_buffer[ticker][k] = current_now
+
             updates_db[f'{ticker}/baseline']       = naver_score
             updates_db[f'{ticker}/last_score']     = naver_score
             updates_db[f'{ticker}/target_yield']   = target_yield
-            updates_db[f'{ticker}/current_yield']  = current_now   # 현재 틱 위치 명시적 동기화
+            updates_db[f'{ticker}/current_yield']  = current_now
             updates_db[f'{ticker}/last_update_ts'] = now_ts
 
             print(
@@ -334,48 +303,43 @@ def fetch_and_update():
     if updates_db:
         db.reference('chart_data/trends').update(updates_db)
 
-    elapsed = int(time.time() - now_ts)
     print(f"{'─'*52}")
-    print(f"완료: 성공 {success} / 실패 {fail}  ({elapsed}초 소요)")
+    print(f"완료: 성공 {success} / 실패 {fail}  ({int(time.time()-now_ts)}초 소요)")
     print(f"{'─'*52}\n")
 
-    # ★ interval job이 이미 등록돼 있으면 추가 스케줄링 불필요
-    if scheduler.get_job('fetch_interval') is None:
-        _schedule_next_fetch(current_count)
+    # ★ interval job 없을 때만 다음 수집 예약
+    if scheduler.get_job('fetch_10min') is None:
+        _schedule_next_fetch()
 
 
-def _schedule_next_fetch(completed_count: int):
-    """
-    수집 완료 직후 호출.
-    - 1차 완료 → 다음 분 정각에 2차 수집
-    - 2차 완료 → 다음 분 정각 + 10분 뒤부터 10분 간격 반복
-    """
+def _schedule_next_fetch():
+    """1차 완료→2차 예약, 2차 완료→10분 간격 등록"""
     now_kst   = datetime.now(KST)
-    next_mark = next_minute_mark(now_kst)
+    next_mark = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
-    if completed_count == 1:
-        # 1차 완료: 다음 분 정각에 2차 수집
+    if scheduler.get_job('fetch_2nd') is None:
+        # 아직 2차 미등록 → 2차 예약
         print(f"[→] 2차 수집 예정: {next_mark.strftime('%H:%M:%S')}")
         scheduler.add_job(
             fetch_and_update, 'date',
             run_date=next_mark,
             max_instances=1,
-            id='fetch_once_2'
+            id='fetch_2nd'
         )
-    elif completed_count == 2:
-        # 2차 완료: 다음 분 정각 + 10분 뒤부터 10분 간격 반복
+    else:
+        # 2차 완료 후 → 10분 간격
         interval_start = next_mark + timedelta(minutes=10)
-        print(f"[→] 10분 간격 시작: {interval_start.strftime('%H:%M:%S')} (이후 매 10분)")
+        print(f"[→] 10분 간격 시작: {interval_start.strftime('%H:%M:%S')}")
         scheduler.add_job(
             fetch_and_update, 'interval', minutes=10,
             start_date=interval_start,
             max_instances=1, coalesce=True,
-            id='fetch_interval'
+            id='fetch_10min'
         )
 
 
 # ---------------------------------------------------------
-# 7. 자정 리셋
+# 6. 자정 리셋
 # ---------------------------------------------------------
 def daily_reset():
     print(f"\n[자정 리셋] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -396,90 +360,65 @@ def daily_reset():
             tick_state[ticker]   = {'counter': 0, 'dir': 1}
         db.reference('chart_data/trends').update(updates)
         candle_snapshot.clear()
-        print("자정 리셋 완료")
     except Exception as e:
         print(f"리셋 에러: {e}")
 
 
 # ---------------------------------------------------------
-# 8. 초기화 (시작 시 Firebase + 로컬 버퍼 완전 초기화)
+# 7. 초기화 (chart_history 유지, 수치만 리셋)
 # ---------------------------------------------------------
 def initialize_app():
-    """
-    chart_history는 유지.
-    trends(current_yield/target_yield/baseline)와 live_data만 초기화.
-    로컬 버퍼도 0으로 리셋.
-    """
-    print("=" * 52)
-    print("앱 초기화 — chart_history 유지, 수치 리셋")
-    print("=" * 52)
-
+    print("초기화 중... (chart_history 유지)")
     now_ts  = int(time.time())
     updates = {}
     for ticker in TICKER_KEYS:
         updates[ticker] = {
-            'baseline':       0,
-            'last_score':     0,
-            'target_yield':   0.0,
-            'current_yield':  0.0,
+            'baseline': 0, 'last_score': 0,
+            'target_yield': 0.0, 'current_yield': 0.0,
             'last_update_ts': now_ts
         }
         ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
         tick_state[ticker]  = {'counter': 0, 'dir': 1}
-
-    # trends · live_data 초기화 (chart_history 는 건드리지 않음)
     db.reference('chart_data/trends').set(updates)
     db.reference('chart_data/live_data').set({})
     candle_snapshot.clear()
-    print("초기화 완료 — chart_history 보존\n")
+    print("초기화 완료\n")
 
 
 # ---------------------------------------------------------
-# 9. 스케줄러 설정 및 실행
+# 8. 스케줄러
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
+
+def run_ticks():
+    generate_ticks()
+    delay    = random.uniform(0.5, 1.0)   # ★ 0.5~1.0초 랜덤
+    next_run = datetime.now(KST) + timedelta(seconds=delay)
+    scheduler.add_job(run_ticks, 'date', run_date=next_run)
+
 
 if __name__ == "__main__":
     initialize_app()
 
-    now_kst    = datetime.now(KST)
-    first_sync = next_minute_mark(now_kst)
+    now        = datetime.now(KST)
+    first_sync = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
-    print(f"현재 시각:       {now_kst.strftime('%H:%M:%S')}")
-    print(f"1차 수집 예정:   {first_sync.strftime('%H:%M:%S')}")
-    print(f"(이후 수집은 각 완료 직후 다음 분 정각에 자동 예약)")
-    print()
+    print(f"현재: {now.strftime('%H:%M:%S')}  |  1차 수집: {first_sync.strftime('%H:%M:%S')}")
+    print(f"2차는 1차 완료 직후 다음 분 정각, 이후 10분 간격\n")
 
-    # 1차 수집: 다음 분 정각
-    scheduler.add_job(
-        fetch_and_update, 'date',
-        run_date=first_sync,
-        max_instances=1,
-        id='fetch_once_1'
-    )
+    # 1차 수집
+    scheduler.add_job(fetch_and_update, 'date', run_date=first_sync,
+                      max_instances=1, id='fetch_1st')
 
-    # 매 분 :57초 — 봉 마감 스냅샷
-    scheduler.add_job(
-        take_candle_snapshot, 'cron',
-        second=57,
-        max_instances=1
-    )
+    # 매 분 :57초 — 봉 스냅샷
+    scheduler.add_job(take_candle_snapshot, 'cron', second=57, max_instances=1)
 
-    # 매 분 :00초 — 스냅샷으로 분봉 저장 + 새 봉 시작
-    scheduler.add_job(
-        record_minute_candle, 'cron',
-        second=0,
-        max_instances=1
-    )
+    # 매 분 :00초 — 분봉 저장
+    scheduler.add_job(record_minute_candle, 'cron', second=0, max_instances=1)
 
     # 자정 리셋
-    scheduler.add_job(
-        daily_reset, 'cron',
-        hour=0, minute=0, second=0
-    )
+    scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
 
-    # 틱 엔진 시작 (0.5 ~ 1.0 초 랜덤 간격)
     run_ticks()
-
     scheduler.start()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
