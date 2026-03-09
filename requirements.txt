@@ -3,4 +3,4 @@ firebase-admin
 apscheduler
 numpy
 pytz
-pageviewapi
+requests
