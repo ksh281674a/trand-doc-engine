@@ -129,7 +129,7 @@ def generate_ticks():
                     move = cur_dir * base + np.random.normal(0, volatility * 0.5)
 
                 # ★ max_step: abs_dist * 0.006 → 600틱(10분)에 걸쳐 자연 수렴
-                max_step = max(0.00015, abs_dist * 0.006)
+                max_step = max(0.00015, abs_dist * 0.045)
                 move     = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
