@@ -311,10 +311,13 @@ def fetch_and_update():
 
             target_yield = float(np.clip(target_yield, -0.30, 0.30))
 
-            # current_yield 는 건드리지 않음 — 틱 엔진이 수렴
+            # target_yield 업데이트 (current_yield는 틱 엔진이 수렴)
+            # ohlc_buffer의 current close 값을 기준으로 수렴 시작 보장
+            current_now = ohlc_buffer.get(ticker, {}).get('close', data.get('current_yield', 0.0))
             updates_db[f'{ticker}/baseline']       = naver_score
             updates_db[f'{ticker}/last_score']     = naver_score
             updates_db[f'{ticker}/target_yield']   = target_yield
+            updates_db[f'{ticker}/current_yield']  = current_now   # 현재 틱 위치 명시적 동기화
             updates_db[f'{ticker}/last_update_ts'] = now_ts
 
             print(
@@ -335,8 +338,9 @@ def fetch_and_update():
     print(f"완료: 성공 {success} / 실패 {fail}  ({elapsed}초 소요)")
     print(f"{'─'*52}\n")
 
-    # ★ 수집 완료 후 다음 수집 스케줄링
-    _schedule_next_fetch(current_count)
+    # ★ interval job이 이미 등록돼 있으면 추가 스케줄링 불필요
+    if scheduler.get_job('fetch_interval') is None:
+        _schedule_next_fetch(current_count)
 
 
 def _schedule_next_fetch(completed_count: int):
