@@ -1,10 +1,6 @@
 flask
-pytrends-modern
-gspread
+pageviewapi
 firebase-admin
 apscheduler
-pandas
-pytz
-selenium
-requests
 numpy
+pytz
