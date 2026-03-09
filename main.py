@@ -85,40 +85,29 @@ def generate_ticks():
                 convergence_strength = 1.0 + convergence_ratio * 2.0
                 ideal_step = (distance / remaining_sec) * convergence_strength
 
-                # 틱 방향 상태
-                state   = tick_state.get(ticker, {'counter': 0, 'dir': 1})
+                # ── 수렴 보장 + 오르락내리락 ──────────────────────────────
+                # ideal_step 은 항상 target 방향. 그 위에 oscillation 추가.
+                # oscillation 크기는 ideal_step 절댓값의 최대 80% → 합산 방향은 항상 target쪽
+
+                state   = tick_state.get(ticker, {'counter': 0, 'osc_dir': 1})
                 counter = state['counter']
-                cur_dir = state['dir']
+                osc_dir = state['osc_dir']
 
                 if counter <= 0:
-                    rand = random.random()
-                    if distance > 0:
-                        cur_dir = 1 if rand < 0.58 else -1
-                    elif distance < 0:
-                        cur_dir = -1 if rand < 0.58 else 1
-                    else:
-                        cur_dir = 1 if rand < 0.50 else -1
-                    # 주 방향: 1~2틱, 반대 방향: 1틱 (매우 자주 전환)
-                    if (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0):
-                        counter = random.randint(1, 2)
-                    else:
-                        counter = 1
-                    tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
+                    osc_dir = 1 if random.random() < 0.50 else -1
+                    counter = random.randint(1, 2)
+                    tick_state[ticker] = {'counter': counter, 'osc_dir': osc_dir}
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                volatility = 0.00060 + abs(distance) * 0.012
+                # oscillation: ideal_step 절댓값의 60~80% 크기로 랜덤 방향
+                osc_size = abs(ideal_step) * random.uniform(0.60, 0.80)
+                oscillation = osc_dir * osc_size
 
-                if abs(distance) < 0.0003:
-                    move = np.random.normal(0, volatility * 1.5)
-                else:
-                    base = abs(ideal_step) * random.uniform(2.0, 4.5)
-                    move = cur_dir * base + np.random.normal(0, volatility * 0.3)
+                # 합산 이동량 = 수렴 이동 + 진동
+                move = ideal_step + oscillation
 
-                max_step = max(0.0008, abs(distance) * 0.40)
-                move = float(np.clip(move, -max_step, max_step))
-
-                # target 초과 방지
+                # target 초과 방지 (무조건)
                 projected = current + move
                 if distance > 0 and projected > target:
                     move = target - current
@@ -178,7 +167,7 @@ def record_minute_candle():
                     'open':  close_price, 'high': close_price,
                     'low':   close_price, 'close': close_price
                 }
-                tick_state[ticker] = {'counter': 0, 'dir': 1}
+                tick_state[ticker] = {'counter': 0, 'osc_dir': 1}
 
                 # Firebase current_yield도 close_price로 맞춤 (틱 엔진 sync)
                 current_updates[f'{ticker}/current_yield'] = close_price
