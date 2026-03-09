@@ -125,7 +125,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 네이버 실시간 검색 API (1분 단위 완벽 반영)
+# 4. 네이버 실시간 검색 API (퍼센트 계산 및 레버리지 로직 적용)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -140,7 +140,6 @@ def fetch_and_update():
 
     print(f"\n──────────────── 그룹 {group_idx} 네이버 실시간 수집 시작 ────────────────")
     
-    # 🌟 전달해주신 네이버 API 키 직접 삽입
     naver_client_id = "0G9LeMqi2n9OQTmH0ueC"
     naver_client_secret = "6tgdSvlfjA"
     
@@ -152,14 +151,12 @@ def fetch_and_update():
     for ticker in current_group_tickers:
         try:
             search_query = SEARCH_MAPPING[ticker]
-            # 네이버 블로그 실시간 문서 총합 요청
             url = f"https://openapi.naver.com/v1/search/blog.json?query={urllib.parse.quote(search_query)}&display=1"
             
             response = requests.get(url, headers=headers, timeout=5)
             
             if response.status_code == 200:
                 json_data = response.json()
-                # 🌟 실시간 전체 문서(버즈)량 추출
                 current_score = float(json_data.get('total', 0))
             else:
                 print(f" ❌ {ticker.ljust(10)} 네이버 API 에러: {response.status_code}")
@@ -172,8 +169,19 @@ def fetch_and_update():
             if baseline == 0:
                 baseline = current_score
             
-            # 네이버 데이터 특성에 맞춰 가중치(0.001) 적용
-            target_yield = round((current_score - baseline) * 0.001 + random.uniform(-0.0005, 0.0005), 5)
+            # 🌟 [핵심 변경] 퍼센트가 제대로 오르내리도록 공식 수정
+            if baseline > 0:
+                # 1. 실제 변화율 계산 (예: 23건 증가 / 383,127건 = 0.00006)
+                real_change_rate = (current_score - baseline) / baseline
+                
+                # 2. 변화율에 '레버리지(약 150배)'를 곱해 주식처럼 등락폭 만들기 + 미세한 랜덤 변동성
+                leverage = 150 
+                target_yield = round((real_change_rate * leverage) + random.uniform(-0.001, 0.001), 5)
+            else:
+                target_yield = random.uniform(-0.001, 0.001)
+            
+            # 주가가 우주로 가지 않게 최대 상하한선(±15%) 캡 씌우기
+            target_yield = float(np.clip(target_yield, -0.15, 0.15))
             
             ref.update({
                 'baseline': baseline,
@@ -208,15 +216,19 @@ def daily_reset():
         if updates: db.reference('chart_data/trends').update(updates)
     except Exception as e: print(f"❌ 리셋 에러: {e}")
 
+# 🌟 [핵심 변경] 38000% 폭등 방지를 위해 기존 데이터 싹 지우고 시작
 def initialize_app():
-    print("🚀 Firebase 초기화 중... (기준점 0으로 시작)")
+    print("🚀 Firebase 초기화 중... (기존 과거 데이터 강제 초기화 및 0점 세팅)")
+    updates = {}
+    now_ts = int(time.time())
     for ticker in TICKER_KEYS:
-        ref = db.reference(f'chart_data/trends/{ticker}')
-        if not ref.get():
-            ref.set({
-                'baseline': 0, 'last_score': 0, 'target_yield': 0.0, 
-                'current_yield': 0.0, 'last_update_ts': int(time.time())
-            })
+        updates[ticker] = {
+            'baseline': 0, 'last_score': 0, 'target_yield': 0.0, 
+            'current_yield': 0.0, 'last_update_ts': now_ts
+        }
+        ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
+    # 파이어베이스의 trends 노드를 아예 새로운 0값으로 덮어씌움
+    db.reference('chart_data/trends').set(updates)
 
 # ---------------------------------------------------------
 # 5. 스케줄러 설정
