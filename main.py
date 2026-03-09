@@ -400,24 +400,27 @@ if __name__ == "__main__":
     print(f"[1] 첫 수집 예정:    {first_sync.strftime('%H:%M:%S')}")
     print(f"[2] 두번째 수집 예정: {second_sync.strftime('%H:%M:%S')}")
 
-    def schedule_next_fetch():
-        """다음 10분 정각에 fetch 예약"""
+    def schedule_next_fetch(run_date):
+        """run_date 시각에 fetch 예약, 완료 후 +10분 반복"""
         def fetch_and_reschedule():
             fetch_and_update()
-            schedule_next_fetch()
-        next_run = next_10min_boundary(datetime.now(KST))
-        print(f"[다음 수집 예정] {next_run.strftime('%H:%M:%S')}")
+            next_run = run_date + timedelta(minutes=10)
+            print(f"[다음 수집 예정] {next_run.strftime('%H:%M:%S')}")
+            schedule_next_fetch(next_run)
         scheduler.add_job(
             fetch_and_reschedule, 'date',
-            run_date=next_run,
+            run_date=run_date,
             max_instances=1,
-            id=f'fetch_{int(next_run.timestamp())}',
+            id=f'fetch_{int(run_date.timestamp())}',
             misfire_grace_time=60
         )
 
     def second_fetch_then_schedule():
         fetch_and_update()
-        schedule_next_fetch()
+        # 수집 완료 후 → 다음 분 :00 부터 10분 간격
+        first_interval = next_minute_mark(datetime.now(KST))
+        print(f"[3~] 다음 수집: {first_interval.strftime('%H:%M:%S')} → 이후 10분 간격")
+        schedule_next_fetch(first_interval)
 
     scheduler.add_job(fetch_and_update,           'date', run_date=first_sync,  max_instances=1)
     scheduler.add_job(second_fetch_then_schedule, 'date', run_date=second_sync, max_instances=1)
