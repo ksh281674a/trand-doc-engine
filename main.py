@@ -79,17 +79,19 @@ def generate_ticks():
 
                 rand = random.random()
                 if abs(distance) < 0.0005:
-                    # 목표 근처: 작은 노이즈만
+                    # 목표 근처(수렴 완료): 아주 작은 노이즈만
                     move = np.random.normal(0, volatility * 0.3)
-                elif rand < 0.65:
-                    # 65% 목표 방향
-                    move = ideal_step * random.uniform(0.9, 1.8) + np.random.normal(0, volatility)
+                elif rand < 0.60:
+                    # 60% 목표 방향 (주 방향 봉)
+                    move = ideal_step * random.uniform(1.0, 2.0) + np.random.normal(0, volatility)
                 elif rand < 0.85:
-                    # 20% 약한 반대 방향 (자연스러운 되돌림)
-                    move = -ideal_step * random.uniform(0.2, 0.6) + np.random.normal(0, volatility)
+                    # 25% 반대 방향 봉 (음봉/양봉 자연스럽게)
+                    # 반대로 가되 ideal_step 절반 이내로 제한 → 수렴 보장
+                    counter = -ideal_step * random.uniform(0.3, 0.7) + np.random.normal(0, volatility)
+                    move = counter
                 else:
-                    # 15% 횡보 노이즈
-                    move = np.random.normal(0, volatility * 0.6)
+                    # 15% 횡보
+                    move = np.random.normal(0, volatility * 0.5)
 
                 max_step = max(0.0002, abs(distance) * 0.25)
                 move = float(np.clip(move, -max_step, max_step))
@@ -319,27 +321,6 @@ def run_ticks():
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
 
-def fetch_once_then_schedule_10min():
-    """
-    1분 뒤 1회 수집 후, 다음 10분 정각부터 10분 간격으로 전환
-    예) 16:32에 끝나면 → 다음 수집은 17:00 (다음 10분 정각)
-    """
-    fetch_and_update()
-    now = datetime.now(KST)
-
-    # 다음 10분 정각 계산 (분을 10분 단위로 올림)
-    next_10min_minute = ((now.minute // 10) + 1) * 10
-    if next_10min_minute >= 60:
-        next_sync = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    else:
-        next_sync = now.replace(minute=next_10min_minute, second=0, microsecond=0)
-
-    print(f"📡 다음 10분 정각 수집 예정: {next_sync.strftime('%H:%M:%S')}")
-    scheduler.add_job(
-        fetch_and_update, 'cron', minute='0,10,20,30,40,50',
-        start_date=next_sync, max_instances=1, coalesce=True,
-        id='fetch_10min'
-    )
 
 
 if __name__ == "__main__":
@@ -347,16 +328,21 @@ if __name__ == "__main__":
 
     now = datetime.now(KST)
 
-    # ① 시작 즉시 1회 수집
-    print("📡 [1] 시작 즉시 첫 수집...")
-    fetch_and_update()
+    # 다음 10분 정각 계산
+    def next_10min_mark(dt):
+        next_m = ((dt.minute // 10) + 1) * 10
+        if next_m >= 60:
+            return (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        return dt.replace(minute=next_m, second=0, microsecond=0)
 
-    # ② 1분 뒤 1회 수집 → 그 이후부터 10분 간격으로 자동 전환
-    one_min_later = now + timedelta(minutes=1)
-    print(f"📡 [2] 1분 뒤 수집 예정: {one_min_later.strftime('%H:%M:%S')}")
+    first_sync = next_10min_mark(now)
+    print(f"📡 첫 수집 예정 (다음 10분 정각): {first_sync.strftime('%H:%M:%S')}")
+
+    # 모든 수집을 10분 정각에만 실행 (:00, :10, :20, :30, :40, :50)
     scheduler.add_job(
-        fetch_once_then_schedule_10min, 'date',
-        run_date=one_min_later, max_instances=1
+        fetch_and_update, 'cron', minute='0,10,20,30,40,50',
+        start_date=first_sync, max_instances=1, coalesce=True,
+        id='fetch_10min'
     )
 
     # 분봉 기록: 매 1분 정각
