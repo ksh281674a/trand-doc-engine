@@ -6,7 +6,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import pytz
 import urllib.parse
-import requests  # 🌟 말썽쟁이 라이브러리 대신 안정적인 직접 통신 사용
+import requests  # 🌟 네이버 통신을 위한 라이브러리 유지
 import firebase_admin
 from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,25 +31,25 @@ except Exception as e:
     print(f"❌ Firebase 인증 실패: {e}")
 
 # ---------------------------------------------------------
-# 2. 34개 종목 및 위키피디아 매핑
+# 2. 34개 종목 및 네이버 검색어 매핑 (자연스러운 키워드로 변경)
 # ---------------------------------------------------------
-WIKI_MAPPING = {
-    "카카오": "카카오_(기업)", "인스타그램": "인스타그램", "틱톡": "틱톡", "X (트위터)": "X_(소셜_네트워크)",
-    "유튜브": "YouTube", "치지직": "치지직", "SOOP": "SOOP", "쿠팡": "쿠팡",
+SEARCH_MAPPING = {
+    "카카오": "카카오", "인스타그램": "인스타그램", "틱톡": "틱톡", "X (트위터)": "트위터",
+    "유튜브": "유튜브", "치지직": "치지직", "SOOP": "SOOP", "쿠팡": "쿠팡",
     "알리": "알리익스프레스", "무신사": "무신사", "테무": "테무", "네이버": "네이버",
-    "구글": "구글", "다음": "다음_(포털_사이트)", "MS (Bing)": "빙_(검색_엔진)", "배달의민족": "배달의민족",
-    "쿠팡이츠": "쿠팡이츠", "요기요": "요기요", "유튜브 뮤직": "유튜브_뮤직", "멜론": "멜론_(서비스)",
-    "애플뮤직": "애플_뮤직", "라이엇": "라이엇_게임즈", "스팀": "스팀_(서비스)", "넥슨": "넥슨",
+    "구글": "구글", "다음": "다음 포털", "MS (Bing)": "마이크로소프트 빙", "배달의민족": "배달의민족",
+    "쿠팡이츠": "쿠팡이츠", "요기요": "요기요", "유튜브 뮤직": "유튜브 뮤직", "멜론": "멜론 노래",
+    "애플뮤직": "애플뮤직", "라이엇": "라이엇게임즈", "스팀": "스팀 게임", "넥슨": "넥슨",
     "넷플릭스": "넷플릭스", "티빙": "티빙", "쿠팡플레이": "쿠팡플레이", "왓챠": "왓챠",
-    "네이버웹툰": "네이버_웹툰", "카카오페이지": "카카오페이지", "하이브": "하이브_(기업)", "SM": "SM_엔터테인먼트",
-    "YG": "YG_엔터테인먼트", "JYP": "JYP_엔터테인먼트"
+    "네이버웹툰": "네이버웹툰", "카카오페이지": "카카오페이지", "하이브": "하이브", "SM": "SM엔터테인먼트",
+    "YG": "YG엔터테인먼트", "JYP": "JYP엔터테인먼트"
 }
 
-TICKER_KEYS = list(WIKI_MAPPING.keys())
+TICKER_KEYS = list(SEARCH_MAPPING.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (수직 점프 방지 및 0.5~1.5s 랜덤 진동)
+# 3. 데이터 엔진 (수직 점프 방지 및 랜덤 진동 - 무조건 유지)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -80,7 +80,6 @@ def generate_ticks():
                 else:
                     move = -ideal_step * random.uniform(0.7, 1.5)
                 
-                # 🌟 [안정 장치 유지] 캔들 찢어짐 방지 보폭 제한
                 move = np.clip(move, -0.0012, 0.0012)
                 
                 shiver = np.random.normal(0, 0.0011) 
@@ -126,7 +125,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 위키피디아 직접 통신 수집 로직 (에러 원천 차단)
+# 4. 네이버 실시간 검색 API (1분 단위 완벽 반영)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -139,42 +138,46 @@ def fetch_and_update():
     
     if not current_group_tickers: return
 
-    print(f"\n──────────────── 그룹 {group_idx} 위키 수집 시작 ────────────────")
-    # 위키피디아 API 날짜 포맷 (YYYYMMDD00)
-    target_date = (now - timedelta(days=1)).strftime('%Y%m%d00')
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    print(f"\n──────────────── 그룹 {group_idx} 네이버 실시간 수집 시작 ────────────────")
+    
+    # 🌟 환경 변수에서 네이버 API 키 가져오기
+    naver_client_id = os.environ.get("NAVER_CLIENT_ID", "")
+    naver_client_secret = os.environ.get("NAVER_CLIENT_SECRET", "")
+    
+    if not naver_client_id:
+        print("⚠️ NAVER_CLIENT_ID 환경 변수가 설정되지 않았습니다!")
+        return
+    
+    headers = {
+        "X-Naver-Client-Id": naver_client_id,
+        "X-Naver-Client-Secret": naver_client_secret
+    }
     
     for ticker in current_group_tickers:
         try:
-            wiki_title = WIKI_MAPPING[ticker]
-            # 한국어 위키백과 URL에 맞게 한글 인코딩
-            encoded_title = urllib.parse.quote(wiki_title, safe='')
-            
-            # 🌟 외부 라이브러리 없이 위키피디아 API와 직접 통신
-            url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/ko.wikipedia/all-access/all-agents/{encoded_title}/daily/{target_date}/{target_date}"
+            search_query = SEARCH_MAPPING[ticker]
+            # 네이버 블로그 실시간 문서 총합 요청 (뉴스로 원하시면 /news.json 으로 변경)
+            url = f"https://openapi.naver.com/v1/search/blog.json?query={urllib.parse.quote(search_query)}&display=1"
             
             response = requests.get(url, headers=headers, timeout=5)
             
             if response.status_code == 200:
                 json_data = response.json()
-                if 'items' in json_data and len(json_data['items']) > 0:
-                    current_score = float(json_data['items'][0]['views'])
-                else:
-                    current_score = 0.0
+                # 🌟 방금까지 네이버에 작성된 이 서비스에 대한 총 글의 개수 (실시간 반영)
+                current_score = float(json_data.get('total', 0))
             else:
-                # 404 에러 등 문서가 없거나 실패 시
-                print(f" ❌ {ticker.ljust(10)} 위키 API 응답 에러: {response.status_code}")
+                print(f" ❌ {ticker.ljust(10)} 네이버 API 에러: {response.status_code}")
                 continue
             
             ref = db.reference(f'chart_data/trends/{ticker}')
             data = ref.get() or {}
             
-            # [동적 점수 반영] baseline이 0이면 첫 수집값을 기준으로 설정
             baseline = data.get('baseline', 0)
             if baseline == 0:
                 baseline = current_score
             
-            target_yield = round((current_score - baseline) * 0.005 + random.uniform(-0.0005, 0.0005), 5)
+            # 🌟 네이버는 단위가 크기 때문에 수익률이 안 튀게 보정 (가중치 0.001)
+            target_yield = round((current_score - baseline) * 0.001 + random.uniform(-0.0005, 0.0005), 5)
             
             ref.update({
                 'baseline': baseline,
@@ -182,7 +185,7 @@ def fetch_and_update():
                 'target_yield': target_yield,
                 'last_update_ts': now_ts
             })
-            print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (조회수: {int(current_score)})")
+            print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (실시간 버즈량: {int(current_score):,}건)")
             time.sleep(0.1) 
             
         except Exception as e:
@@ -226,7 +229,6 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    # 🌟 랜덤 들썩임 주기 (0.5초 ~ 1.5초) 유지
     next_run_delay = random.uniform(0.5, 1.5)
     next_run = datetime.now(KST) + timedelta(seconds=next_run_delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
