@@ -104,11 +104,13 @@ def generate_ticks():
                         cur_dir = 1 if rand < 0.50 else -1
                         counter = random.randint(1, 2)
                     elif mode == 'reverse':
-                        # 음봉 확정 구간: 역방향으로만 이동
-                        cur_dir = -1 if distance > 0 else 1
-                        counter = random.randint(2, 4)
+                        # 역방향 우세(70%) 이지만 30%는 정방향으로도 갈 수 있음
+                        rev_dir = -1 if distance > 0 else 1
+                        cur_dir = rev_dir if rand < 0.70 else -rev_dir
+                        same_rev = (cur_dir == rev_dir)
+                        counter = random.randint(2, 4) if same_rev else random.randint(1, 2)
                     else:
-                        # 일반 구간: 목표 방향 65%
+                        # 정방향 우세(65%) 이지만 35%는 역방향으로도 갈 수 있음
                         if distance > 0:
                             cur_dir = 1 if rand < 0.65 else -1
                         elif distance < 0:
