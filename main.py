@@ -48,6 +48,7 @@ TICKER_KEYS     = list(SEARCH_MAPPING.keys())
 ohlc_buffer     = {}
 tick_state      = {}
 candle_snapshot = {}   # :57초 봉 마감 스냅샷
+fetch_count     = 0    # 수집 완료 횟수
 
 # ---------------------------------------------------------
 # 3. 틱 엔진  ★ 수정: 수렴 속도 / 오르락내리락 / 일방통행 방지
@@ -231,6 +232,9 @@ def fetch_and_update():
         "X-Naver-Client-Secret": "6tgdSvlfjA"
     }
 
+    global fetch_count
+    fetch_count += 1
+
     all_trends = db.reference('chart_data/trends').get() or {}
     updates_db = {}
     success, fail = 0, 0
@@ -313,12 +317,12 @@ def fetch_and_update():
 
 
 def _schedule_next_fetch():
-    """1차 완료→2차 예약, 2차 완료→10분 간격 등록"""
+    """1차 완료→2차 예약, 2차 완료→10분 간격 등록 (fetch_count 기반)"""
     now_kst   = datetime.now(KST)
     next_mark = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
-    if scheduler.get_job('fetch_2nd') is None:
-        # 아직 2차 미등록 → 2차 예약
+    if fetch_count == 1:
+        # 1차 완료 → 2차 예약
         print(f"[→] 2차 수집 예정: {next_mark.strftime('%H:%M:%S')}")
         scheduler.add_job(
             fetch_and_update, 'date',
@@ -326,8 +330,8 @@ def _schedule_next_fetch():
             max_instances=1,
             id='fetch_2nd'
         )
-    else:
-        # 2차 완료 후 → 10분 간격
+    elif fetch_count == 2:
+        # 2차 완료 → 10분 간격 등록
         interval_start = next_mark + timedelta(minutes=10)
         print(f"[→] 10분 간격 시작: {interval_start.strftime('%H:%M:%S')}")
         scheduler.add_job(
