@@ -132,17 +132,17 @@ def generate_ticks():
                     tick_state[ticker]['counter'] = counter - 1
 
                 # --- 이동량 계산 ---
-                volatility = 0.00060 + abs_dist * 0.012
+                volatility = 0.00180 + abs_dist * 0.030
 
                 if near_target:
                     # 수렴 근처: 작은 랜덤 진동
-                    move = cur_dir * abs(np.random.normal(0, volatility * 1.2))
+                    move = cur_dir * abs(np.random.normal(0, volatility * 2.5))
                 else:
-                    base = abs(ideal_step) * random.uniform(2.0, 4.0)
-                    move = cur_dir * base + np.random.normal(0, volatility * 0.3)
+                    base = abs(ideal_step) * random.uniform(3.0, 6.0)
+                    move = cur_dir * base + np.random.normal(0, volatility * 1.0)
 
                 # 최대 이동폭 제한
-                max_step = max(0.0008, abs_dist * 0.40)
+                max_step = max(0.0020, abs_dist * 0.55)
                 move     = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
@@ -403,30 +403,27 @@ def daily_reset():
 # 8. 초기화 (시작 시 Firebase + 로컬 버퍼 완전 초기화)
 # ---------------------------------------------------------
 def initialize_app():
+    """
+    Firebase 기존 데이터는 유지하고, 로컬 버퍼만 Firebase 현재값으로 복원.
+    chart_history, trends 데이터 삭제 없음.
+    """
     print("=" * 52)
-    print("앱 초기화 — Firebase 데이터 및 로컬 버퍼 리셋")
+    print("앱 초기화 — 기존 데이터 유지, 로컬 버퍼 복원")
     print("=" * 52)
-    now_ts   = int(time.time())
-    updates  = {}
-    for ticker in TICKER_KEYS:
-        updates[ticker] = {
-            'baseline':       0,
-            'last_score':     0,
-            'target_yield':   0.0,
-            'current_yield':  0.0,
-            'last_update_ts': now_ts
-        }
-        ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
-        tick_state[ticker]  = {'counter': 0, 'dir': 1}
 
-    # chart_history 초기화
-    db.reference('chart_data').set({
-        'trends':       updates,
-        'live_data':    {},
-        'chart_history': {}
-    })
+    existing = db.reference('chart_data/trends').get() or {}
+
+    for ticker in TICKER_KEYS:
+        data         = existing.get(ticker, {})
+        close_price  = data.get('current_yield', 0.0)
+        ohlc_buffer[ticker] = {
+            'open':  close_price, 'high': close_price,
+            'low':   close_price, 'close': close_price
+        }
+        tick_state[ticker] = {'counter': 0, 'dir': 1}
+
     candle_snapshot.clear()
-    print("초기화 완료\n")
+    print(f"복원 완료 — {len(existing)}개 종목 버퍼 로드\n")
 
 
 # ---------------------------------------------------------
