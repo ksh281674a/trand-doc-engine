@@ -406,26 +406,32 @@ def daily_reset():
 # ---------------------------------------------------------
 def initialize_app():
     """
-    Firebase 기존 데이터는 유지하고, 로컬 버퍼만 Firebase 현재값으로 복원.
-    chart_history, trends 데이터 삭제 없음.
+    chart_history는 유지.
+    trends(current_yield/target_yield/baseline)와 live_data만 초기화.
+    로컬 버퍼도 0으로 리셋.
     """
     print("=" * 52)
-    print("앱 초기화 — 기존 데이터 유지, 로컬 버퍼 복원")
+    print("앱 초기화 — chart_history 유지, 수치 리셋")
     print("=" * 52)
 
-    existing = db.reference('chart_data/trends').get() or {}
-
+    now_ts  = int(time.time())
+    updates = {}
     for ticker in TICKER_KEYS:
-        data         = existing.get(ticker, {})
-        close_price  = data.get('current_yield', 0.0)
-        ohlc_buffer[ticker] = {
-            'open':  close_price, 'high': close_price,
-            'low':   close_price, 'close': close_price
+        updates[ticker] = {
+            'baseline':       0,
+            'last_score':     0,
+            'target_yield':   0.0,
+            'current_yield':  0.0,
+            'last_update_ts': now_ts
         }
-        tick_state[ticker] = {'counter': 0, 'dir': 1}
+        ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
+        tick_state[ticker]  = {'counter': 0, 'dir': 1}
 
+    # trends · live_data 초기화 (chart_history 는 건드리지 않음)
+    db.reference('chart_data/trends').set(updates)
+    db.reference('chart_data/live_data').set({})
     candle_snapshot.clear()
-    print(f"복원 완료 — {len(existing)}개 종목 버퍼 로드\n")
+    print("초기화 완료 — chart_history 보존\n")
 
 
 # ---------------------------------------------------------
