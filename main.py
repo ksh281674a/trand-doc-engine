@@ -65,9 +65,18 @@ def generate_ticks():
         for ticker, data in all_trends.items():
             try:
                 target  = data.get('target_yield', 0.0)
-                current = data.get('current_yield', 0.0)
-                last_update_ts = data.get('last_update_ts', now_ts - 600)
 
+                # ohlc_buffer가 있으면 거기서 current 읽기 (Firebase sync 지연 무시)
+                if ticker in ohlc_buffer:
+                    current = ohlc_buffer[ticker]['close']
+                else:
+                    current = data.get('current_yield', 0.0)
+                    ohlc_buffer[ticker] = {
+                        'open': current, 'high': current,
+                        'low':  current, 'close': current
+                    }
+
+                last_update_ts = data.get('last_update_ts', now_ts - 600)
                 elapsed_sec   = now_ts - last_update_ts
                 remaining_sec = max(5, 600 - elapsed_sec)
                 distance      = target - current
@@ -84,31 +93,32 @@ def generate_ticks():
                 if counter <= 0:
                     rand = random.random()
                     if distance > 0:
-                        cur_dir = 1 if rand < 0.62 else -1
+                        cur_dir = 1 if rand < 0.58 else -1
                     elif distance < 0:
-                        cur_dir = -1 if rand < 0.62 else 1
+                        cur_dir = -1 if rand < 0.58 else 1
                     else:
                         cur_dir = 1 if rand < 0.50 else -1
+                    # 주 방향: 1~2틱, 반대 방향: 1틱 (매우 자주 전환)
                     if (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0):
-                        counter = random.randint(1, 3)
-                    else:
                         counter = random.randint(1, 2)
+                    else:
+                        counter = 1
                     tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                volatility = 0.00035 + abs(distance) * 0.008
+                volatility = 0.00060 + abs(distance) * 0.012
 
                 if abs(distance) < 0.0003:
-                    move = np.random.normal(0, volatility * 1.2)
+                    move = np.random.normal(0, volatility * 1.5)
                 else:
-                    base = abs(ideal_step) * random.uniform(1.5, 3.5)
-                    move = cur_dir * base + np.random.normal(0, volatility)
+                    base = abs(ideal_step) * random.uniform(2.0, 4.5)
+                    move = cur_dir * base + np.random.normal(0, volatility * 0.3)
 
                 max_step = max(0.0008, abs(distance) * 0.40)
                 move = float(np.clip(move, -max_step, max_step))
 
-                # target 초과 방지 (여유 0으로 타이트하게)
+                # target 초과 방지
                 projected = current + move
                 if distance > 0 and projected > target:
                     move = target - current
@@ -117,12 +127,6 @@ def generate_ticks():
 
                 next_tick = round(current + move, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
-
-                if ticker not in ohlc_buffer:
-                    ohlc_buffer[ticker] = {
-                        'open': current, 'high': current,
-                        'low':  current, 'close': current
-                    }
 
                 buf = ohlc_buffer[ticker]
                 buf['high']  = max(buf['high'],  next_tick)
