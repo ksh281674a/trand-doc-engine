@@ -16,7 +16,7 @@ app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
 
 # ---------------------------------------------------------
-# 1. Firebase 인증 (기존 유지)
+# 1. Firebase 인증
 # ---------------------------------------------------------
 try:
     cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
@@ -49,7 +49,7 @@ TICKER_KEYS = list(SEARCH_MAPPING.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (수직 점프 방지 및 0.5~1.5s 랜덤 진동 - 유지)
+# 3. 데이터 엔진 (🌟 양봉/음봉 지그재그 수렴 로직 적용)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -68,27 +68,33 @@ def generate_ticks():
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
                 elapsed_sec = now_ts - last_update_ts
-                remaining_sec = max(60, 420 - elapsed_sec) 
+                remaining_sec = max(30, 420 - elapsed_sec) 
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
-                reverse_prob = 0.45 - min(0.35, abs(distance) * 10)
+                # 🌟 [핵심] 목표치까지 남은 거리에 비례하여 변동성(캔들 크기) 결정
+                # 5% 폭등일 땐 캔들이 길쭉길쭉하게, 0.1%일 땐 잔잔하게 움직임
+                volatility = 0.0002 + abs(distance) * 0.02
                 
-                if random.random() > reverse_prob:
-                    speed_boost = 1.8 + min(2.2, abs(distance) * 15)
-                    move = ideal_step * random.uniform(speed_boost * 0.8, speed_boost * 1.2)
+                # 🌟 [핵심] 55% 확률로 목표 방향 전진(양봉/음봉 생성), 45% 확률로 조정(반대 색상 캔들)
+                # 이렇게 해야 일직선 수직 상승이 아니라 지그재그 파동을 그리며 수렴함
+                if random.random() < 0.55:
+                    move = ideal_step * random.uniform(1.0, 3.5) + np.random.normal(0, volatility)
                 else:
-                    move = -ideal_step * random.uniform(0.7, 1.5)
+                    move = -ideal_step * random.uniform(0.5, 2.0) + np.random.normal(0, volatility * 0.8)
                 
-                move = np.clip(move, -0.0012, 0.0012)
+                # 수직 찢어짐 방지: 거리가 멀면 보폭을 살짝 열어주되, 최대 0.3% 이상 점프 불가
+                max_step = min(0.003, 0.0005 + abs(distance) * 0.01)
+                move = np.clip(move, -max_step, max_step)
                 
-                shiver = np.random.normal(0, 0.0011) 
+                shiver = np.random.normal(0, 0.0001) 
                 
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': current, 'high': current, 'low': current, 'close': current}
                 
+                # 캔들 꼬리 생성 압력 (너무 한 방향으로만 쏠리지 않게 당겨줌)
                 current_candle_open = ohlc_buffer[ticker]['open']
-                wick_pressure = -(current - current_candle_open) * 0.1
+                wick_pressure = -(current - current_candle_open) * 0.15
                 
                 next_tick = round(current + move + shiver + wick_pressure, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
@@ -125,7 +131,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 네이버 실시간 검색 API (퍼센트 계산 및 레버리지 로직 적용)
+# 4. 네이버 실시간 검색 API (퍼센트 계산 및 레버리지 로직)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -169,18 +175,13 @@ def fetch_and_update():
             if baseline == 0:
                 baseline = current_score
             
-            # 🌟 [핵심 변경] 퍼센트가 제대로 오르내리도록 공식 수정
             if baseline > 0:
-                # 1. 실제 변화율 계산 (예: 23건 증가 / 383,127건 = 0.00006)
                 real_change_rate = (current_score - baseline) / baseline
-                
-                # 2. 변화율에 '레버리지(약 150배)'를 곱해 주식처럼 등락폭 만들기 + 미세한 랜덤 변동성
                 leverage = 150 
                 target_yield = round((real_change_rate * leverage) + random.uniform(-0.001, 0.001), 5)
             else:
                 target_yield = random.uniform(-0.001, 0.001)
             
-            # 주가가 우주로 가지 않게 최대 상하한선(±15%) 캡 씌우기
             target_yield = float(np.clip(target_yield, -0.15, 0.15))
             
             ref.update({
@@ -216,7 +217,6 @@ def daily_reset():
         if updates: db.reference('chart_data/trends').update(updates)
     except Exception as e: print(f"❌ 리셋 에러: {e}")
 
-# 🌟 [핵심 변경] 38000% 폭등 방지를 위해 기존 데이터 싹 지우고 시작
 def initialize_app():
     print("🚀 Firebase 초기화 중... (기존 과거 데이터 강제 초기화 및 0점 세팅)")
     updates = {}
@@ -227,7 +227,6 @@ def initialize_app():
             'current_yield': 0.0, 'last_update_ts': now_ts
         }
         ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
-    # 파이어베이스의 trends 노드를 아예 새로운 0값으로 덮어씌움
     db.reference('chart_data/trends').set(updates)
 
 # ---------------------------------------------------------
