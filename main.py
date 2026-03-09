@@ -50,6 +50,10 @@ ohlc_buffer = {}
 # ---------------------------------------------------------
 # 3. 틱 엔진
 # ---------------------------------------------------------
+
+# 각 ticker의 현재 분봉 내 틱 방향 상태 (오르락내리락용)
+tick_state = {}
+
 def generate_ticks():
     try:
         ref = db.reference('chart_data/trends')
@@ -58,7 +62,7 @@ def generate_ticks():
             return
 
         updates_trends = {}
-        updates_live = {}
+        updates_live   = {}
         now_ts = int(time.time())
 
         for ticker, data in all_trends.items():
@@ -68,46 +72,65 @@ def generate_ticks():
                 last_update_ts = data.get('last_update_ts', now_ts - 600)
 
                 elapsed_sec   = now_ts - last_update_ts
-                remaining_sec = max(5, 600 - elapsed_sec)   # 10분(600초) 수렴
+                remaining_sec = max(5, 600 - elapsed_sec)
                 distance      = target - current
 
+                # 수렴 강도
                 convergence_ratio    = (600 - remaining_sec) / 600
                 convergence_strength = 1.0 + convergence_ratio * 2.0
                 ideal_step = (distance / remaining_sec) * convergence_strength
 
-                volatility = 0.00006 + abs(distance) * 0.002
+                # ── 틱 방향 상태 (오르락내리락 자연스럽게) ──────────────
+                state = tick_state.get(ticker, {'counter': 0, 'dir': 1})
+                counter = state['counter']
+                cur_dir = state['dir']
 
-                rand = random.random()
-                if abs(distance) < 0.0005:
-                    # 목표 근처(수렴 완료): 아주 작은 노이즈만
-                    move = np.random.normal(0, volatility * 0.3)
-                elif rand < 0.60:
-                    # 60% 목표 방향 (주 방향 봉)
-                    move = ideal_step * random.uniform(1.0, 2.0) + np.random.normal(0, volatility)
-                elif rand < 0.85:
-                    # 25% 반대 방향 봉 (음봉/양봉 자연스럽게)
-                    # 반대로 가되 ideal_step 절반 이내로 제한 → 수렴 보장
-                    counter = -ideal_step * random.uniform(0.3, 0.7) + np.random.normal(0, volatility)
-                    move = counter
+                # 3~6틱마다 방향 전환 (단, 주 방향은 반대보다 더 많이 감)
+                if counter <= 0:
+                    rand = random.random()
+                    if distance > 0:
+                        # 올라가야 할 때: 70% 위, 30% 아래
+                        cur_dir = 1 if rand < 0.70 else -1
+                    elif distance < 0:
+                        # 내려가야 할 때: 70% 아래, 30% 위
+                        cur_dir = -1 if rand < 0.70 else 1
+                    else:
+                        cur_dir = 1 if rand < 0.50 else -1
+                    # 방향 유지 틱 수: 주 방향이면 3~6틱, 반대면 1~3틱
+                    if (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0):
+                        counter = random.randint(3, 6)
+                    else:
+                        counter = random.randint(1, 3)
+                    tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
                 else:
-                    # 15% 횡보
-                    move = np.random.normal(0, volatility * 0.5)
+                    tick_state[ticker]['counter'] = counter - 1
 
-                max_step = max(0.0002, abs(distance) * 0.25)
+                # ── 이동량 계산 ──────────────────────────────────────────
+                volatility = 0.00010 + abs(distance) * 0.004
+
+                if abs(distance) < 0.0003:
+                    # 목표 도달: 작은 노이즈 횡보
+                    move = np.random.normal(0, volatility * 0.5)
+                else:
+                    base  = abs(ideal_step) * random.uniform(0.8, 2.0)
+                    noise = np.random.normal(0, volatility)
+                    move  = cur_dir * base + noise
+
+                # 한 틱 최대 이동 제한
+                max_step = max(0.0005, abs(distance) * 0.35)
                 move = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
                 projected = current + move
-                if distance > 0 and projected > target + 0.0002:
-                    move = (target - current) * 0.98
-                elif distance < 0 and projected < target - 0.0002:
-                    move = (target - current) * 0.98
+                if distance > 0 and projected > target + 0.001:
+                    move = (target - current) * 0.95
+                elif distance < 0 and projected < target - 0.001:
+                    move = (target - current) * 0.95
 
-                shiver    = np.random.normal(0, 0.00004)
-                next_tick = round(current + move + shiver, 6)
-
+                next_tick = round(current + move, 6)
                 updates_trends[f'{ticker}/current_yield'] = next_tick
 
+                # ── OHLC 버퍼 업데이트 ───────────────────────────────────
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {
                         'open': current, 'high': current,
@@ -115,10 +138,9 @@ def generate_ticks():
                     }
 
                 buf = ohlc_buffer[ticker]
-                candle_open = buf['open']
-                max_wick    = abs(candle_open) * 0.002 + 0.0004
-                buf['high']  = max(buf['high'],  min(next_tick, candle_open + max_wick))
-                buf['low']   = min(buf['low'],   max(next_tick, candle_open - max_wick))
+                # high/low: 꼬리 제한 없이 실제 틱 그대로 반영
+                buf['high']  = max(buf['high'],  next_tick)
+                buf['low']   = min(buf['low'],   next_tick)
                 buf['close'] = next_tick
 
                 updates_live[ticker] = {
@@ -154,13 +176,18 @@ def record_minute_candle():
                     'open':  candle['open'],  'high': candle['high'],
                     'low':   candle['low'],   'close': candle['close']
                 })
+                # 다음 분봉 open = 직전 close (점프 없음)
                 close_price = candle['close']
                 ohlc_buffer[ticker] = {
                     'open':  close_price, 'high': close_price,
                     'low':   close_price, 'close': close_price
                 }
+                # 틱 방향 상태 초기화 (새 분봉 시작)
+                tick_state[ticker] = {'counter': 0, 'dir': 1}
     except Exception as e:
         print(f"❌ record_minute_candle 에러: {e}")
+
+
 
 
 # ---------------------------------------------------------
