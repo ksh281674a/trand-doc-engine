@@ -153,20 +153,35 @@ def record_minute_candle():
         ts = int(now_utc.timestamp())
         if not ohlc_buffer:
             return
+
+        history_updates  = {}
+        current_updates  = {}
+
         for ticker in TICKER_KEYS:
             candle = ohlc_buffer.get(ticker)
             if candle:
+                close_price = candle['close']
+
+                # 분봉 히스토리 저장
                 db.reference(f'chart_data/chart_history/{ticker}/1m').push({
                     'time': ts,
                     'open':  candle['open'],  'high': candle['high'],
-                    'low':   candle['low'],   'close': candle['close']
+                    'low':   candle['low'],   'close': close_price
                 })
-                close_price = candle['close']
+
+                # ohlc_buffer 초기화 (다음 분봉 open = 직전 close)
                 ohlc_buffer[ticker] = {
                     'open':  close_price, 'high': close_price,
                     'low':   close_price, 'close': close_price
                 }
                 tick_state[ticker] = {'counter': 0, 'dir': 1}
+
+                # Firebase current_yield도 close_price로 맞춤 (틱 엔진 sync)
+                current_updates[f'{ticker}/current_yield'] = close_price
+
+        if current_updates:
+            db.reference('chart_data/trends').update(current_updates)
+
     except Exception as e:
         print(f"record_minute_candle 에러: {e}")
 
@@ -225,8 +240,10 @@ def fetch_and_update():
             if diff == 0:
                 target_yield = random.choice([1, -1]) * random.uniform(0.001, 0.0015)
             else:
+                sign         = 1 if diff > 0 else -1
                 base         = random.uniform(0.001, 0.002)
-                target_yield = (diff * 0.002) + (base * (1 if diff > 0 else -1))
+                log_val      = np.log1p(abs(diff)) * 0.018  # 1건≈1%, 5건≈3%, 10건≈5%, 40건≈8%
+                target_yield = sign * (base + log_val)
 
             target_yield = float(np.clip(target_yield, -0.30, 0.30))
 
