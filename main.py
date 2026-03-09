@@ -49,7 +49,7 @@ TICKER_KEYS = list(SEARCH_MAPPING.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (꼬리 억제 및 부드러운 수렴)
+# 3. 데이터 엔진 (수렴도 강화 및 꼬리 확률 제어)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -68,36 +68,48 @@ def generate_ticks():
                 last_update_ts = data.get('last_update_ts', now_ts - 420)
                 
                 elapsed_sec = now_ts - last_update_ts
-                remaining_sec = max(20, 420 - elapsed_sec) 
+                # 7분(420초) 주기에 맞춘 남은 시간 계산
+                remaining_sec = max(10, 420 - elapsed_sec) 
                 distance = target - current
                 
-                # 수렴 속도 상향 (ideal_step)
+                # 🌟 [수렴 강화] 목표치까지 남은 시간에 따른 보폭 계산
+                # 시간이 얼마 안 남았을수록(remaining_sec이 작을수록) 보폭을 키워 수렴 보장
                 ideal_step = distance / remaining_sec
                 
-                # 🌟 [꼬리 억제] 진동폭과 노이즈 대폭 감소
-                volatility = 0.00005 + abs(distance) * 0.01 
-                
-                if random.random() < 0.60: # 정방향 확률 살짝 상향
-                    move = ideal_step * random.uniform(1.2, 4.0) + np.random.normal(0, volatility)
+                # 🌟 [꼬리 제어] 모든 봉에 꼬리가 생기지 않도록 변동성 확률 제어
+                # 30% 확률로만 노이즈(꼬리 원인) 발생
+                if random.random() < 0.3:
+                    volatility = 0.0001 + abs(distance) * 0.01
+                    shiver = np.random.normal(0, 0.00005)
                 else:
-                    move = -ideal_step * random.uniform(0.5, 1.5) + np.random.normal(0, volatility * 0.5)
+                    volatility = 0.0
+                    shiver = 0.0
+
+                # 거리가 멀면 더 공격적으로 이동, 가까우면(±0.25% 이내) 미세 조정
+                if abs(distance) > 0.0025:
+                    move = ideal_step * random.uniform(1.5, 3.0)
+                else:
+                    move = ideal_step * random.uniform(0.8, 1.2)
                 
-                # 급격한 찢어짐 방지 (캡핑)
-                move = np.clip(move, -0.004, 0.004)
-                
-                # 🌟 [꼬리 억제] 미세 진동 최소화
-                shiver = np.random.normal(0, 0.00005) 
+                # 급격한 수직 이동 방지
+                move = np.clip(move, -0.005, 0.005)
                 
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': current, 'high': current, 'low': current, 'close': current}
                 
-                current_candle_open = ohlc_buffer[ticker]['open']
-                # 🌟 [꼬리 억제] 꼬리 압력 완화
-                wick_pressure = -(current - current_candle_open) * 0.08
+                # 🌟 [꼬리 제어] 꼬리 압력을 20% 확률로만 적용
+                if random.random() < 0.2:
+                    current_candle_open = ohlc_buffer[ticker]['open']
+                    wick_pressure = -(current - current_candle_open) * 0.1
+                else:
+                    wick_pressure = 0
                 
                 next_tick = round(current + move + shiver + wick_pressure, 6)
+                
+                # 다음 사이클을 위해 current_yield 업데이트 준비
                 updates_trends[f'{ticker}/current_yield'] = next_tick
                 
+                # OHLC 갱신
                 ohlc_buffer[ticker]['high'] = max(ohlc_buffer[ticker]['high'], next_tick)
                 ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], next_tick)
                 ohlc_buffer[ticker]['close'] = next_tick
@@ -125,12 +137,13 @@ def record_minute_candle():
                 db.reference(f'chart_data/chart_history/{ticker}/1m').push({
                     'time': ts, 'open': candle['open'], 'high': candle['high'], 'low': candle['low'], 'close': candle['close']
                 })
+                # 다음 봉 시작가 설정
                 ohlc_buffer[ticker] = {'open': candle['close'], 'high': candle['close'], 'low': candle['close'], 'close': candle['close']}
     except Exception as e:
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 네이버 실시간 검색 API (🌟 평균 증가량 대비 하락 로직 적용)
+# 4. 네이버 실시간 검색 API (🌟 밸런싱된 등락 로직)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -143,7 +156,7 @@ def fetch_and_update():
     
     if not current_group_tickers: return
 
-    print(f"\n──────────────── 그룹 {group_idx} 네이버 수집 시작 ────────────────")
+    print(f"\n──────────────── 그룹 {group_idx} 네이버 데이터 연동 ────────────────")
     
     headers = {"X-Naver-Client-Id": "0G9LeMqi2n9OQTmH0ueC", "X-Naver-Client-Secret": "6tgdSvlfjA"}
     
@@ -158,40 +171,38 @@ def fetch_and_update():
                 data = ref.get() or {}
                 
                 baseline = data.get('baseline', current_score)
-                avg_diff = data.get('avg_diff', 0.0) # 🌟 평균 증가량 학습 데이터
+                avg_diff = data.get('avg_diff', 0.0) 
                 
                 diff = current_score - baseline
                 
-                # 🌟 [요구사항] 평균 증가량 대비 하락 로직
-                # 이동 평균 업데이트 (최근 데이터 25% 반영)
+                # 이동 평균(EMA) 학습 (지수 가중 이동 평균 방식)
                 if avg_diff == 0:
                     new_avg = float(diff)
                 else:
-                    new_avg = (avg_diff * 0.75) + (diff * 0.25)
+                    new_avg = (avg_diff * 0.8) + (diff * 0.2)
                 
-                if diff > new_avg:
-                    # 평균보다 많이 올라오면 상승 (증가폭에 따른 보너스 강화)
-                    target_yield = 0.005 + (diff * 0.0006) 
-                elif diff < new_avg and diff > 0:
-                    # 올라오긴 했는데 평균보다 못하면 하락 (조정)
-                    target_yield = -0.012 + (diff * 0.0002)
-                elif diff == 0:
-                    # 증가가 아예 없으면 관심 급락으로 하락
-                    target_yield = -random.uniform(0.015, 0.025)
+                # 🌟 [요구사항 반영] 등락 밸런스 조정
+                if diff > new_avg and diff > 0:
+                    # 평균보다 높으면 확실한 상승 (카카오 5% 등 목표치 달성 용이하게 설정)
+                    target_yield = 0.015 + (diff * 0.005) 
+                elif diff > 0:
+                    # 증가하긴 했으나 평균 이하라면 약보합/조정
+                    target_yield = random.uniform(-0.005, 0.008)
                 else:
-                    # 데이터 이상치 등 마이너스 시 하락
-                    target_yield = -0.020
+                    # 증가량 0이면 서서히 하락 (기존 폭락 방지 위해 하락폭 축소)
+                    target_yield = -random.uniform(0.002, 0.008)
                 
-                target_yield = float(np.clip(target_yield, -0.30, 0.30)) # 최대 30% 제한
+                # 최대 수익률 30% 제한
+                target_yield = float(np.clip(target_yield, -0.30, 0.30)) 
                 
                 ref.update({
                     'baseline': current_score,
                     'last_score': current_score,
-                    'avg_diff': new_avg, # 평균값 저장
+                    'avg_diff': new_avg,
                     'target_yield': target_yield,
                     'last_update_ts': now_ts
                 })
-                print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:>+6.2f}% (찐증가:{int(diff):+} | 평균:{int(new_avg)})")
+                print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:>+6.2f}% (증가:{int(diff):+} | 평균:{int(new_avg)})")
                 time.sleep(0.1)
                 
         except Exception as e:
@@ -208,7 +219,7 @@ def daily_reset():
             data = all_trends.get(ticker, {})
             last_score = data.get('last_score', 0)
             updates[f'{ticker}/baseline'] = last_score
-            updates[f'{ticker}/avg_diff'] = 0.0 # 평균 초기화
+            updates[f'{ticker}/avg_diff'] = 0.0
             updates[f'{ticker}/target_yield'] = 0.0
             updates[f'{ticker}/current_yield'] = 0.0
             updates[f'{ticker}/last_update_ts'] = int(time.time())
@@ -217,7 +228,7 @@ def daily_reset():
     except Exception as e: print(f"❌ 리셋 에러: {e}")
 
 def initialize_app():
-    print("🚀 엔진 가동 (꼬리 억제 및 평균 학습 모드)")
+    print("🚀 트렌드 엔진 초기화 완료")
     updates = {}
     now_ts = int(time.time())
     for ticker in TICKER_KEYS:
@@ -235,8 +246,8 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks_wrapper():
     generate_ticks()
-    # 🌟 틱 생성 주기 랜덤화 (0.6초 ~ 1.3초)
-    next_delay = random.uniform(0.6, 1.3)
+    # 틱 간격 0.7초 ~ 1.2초 사이 랜덤
+    next_delay = random.uniform(0.7, 1.2)
     scheduler.add_job(run_ticks_wrapper, 'date', run_date=datetime.now(KST) + timedelta(seconds=next_delay))
 
 if __name__ == "__main__":
