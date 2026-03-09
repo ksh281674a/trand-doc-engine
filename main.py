@@ -95,9 +95,10 @@ def generate_ticks():
                 elapsed_sec     = now_ts - last_update_ts
                 remaining_sec   = max(5, 600 - elapsed_sec)
 
-                # 수렴 강도: 시간이 지날수록 강해짐
+                # 수렴: 10분 전체를 쓰도록 ideal_step 작게 유지
+                # 초반엔 천천히, 후반엔 조금 빠르게 (자연스러운 수렴)
                 convergence_ratio    = min(1.0, elapsed_sec / 600)
-                convergence_strength = 1.0 + convergence_ratio * 2.0
+                convergence_strength = 0.3 + convergence_ratio * 0.4   # 0.3 ~ 0.7 (느린 수렴)
                 ideal_step           = (distance / remaining_sec) * convergence_strength
 
                 # ★ target 0.3% 이내 = "수렴 근처" → 양봉/음봉 균형 유지
@@ -138,11 +139,11 @@ def generate_ticks():
                     # 수렴 근처: 작은 랜덤 진동
                     move = cur_dir * abs(np.random.normal(0, volatility * 2.5))
                 else:
-                    base = abs(ideal_step) * random.uniform(3.0, 6.0)
+                    base = abs(ideal_step) * random.uniform(0.6, 1.4)
                     move = cur_dir * base + np.random.normal(0, volatility * 1.0)
 
                 # 최대 이동폭 제한
-                max_step = max(0.0020, abs_dist * 0.55)
+                max_step = max(0.0020, abs_dist * 0.15)
                 move     = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
@@ -346,22 +347,23 @@ def fetch_and_update():
 def _schedule_next_fetch(completed_count: int):
     """
     수집 완료 직후 호출.
-    - 1·2차 완료 → 완료 시각 기준 다음 분 정각에 재수집
-    - 3차 완료  → 다음 분 정각 + 10분 간격으로 반복
+    - 1차 완료 → 다음 분 정각에 2차 수집
+    - 2차 완료 → 다음 분 정각 + 10분 뒤부터 10분 간격 반복
     """
-    now_kst    = datetime.now(KST)
-    next_mark  = next_minute_mark(now_kst)
+    now_kst   = datetime.now(KST)
+    next_mark = next_minute_mark(now_kst)
 
-    if completed_count < 3:
-        print(f"[→] {completed_count + 1}차 수집 예정: {next_mark.strftime('%H:%M:%S')}")
+    if completed_count == 1:
+        # 1차 완료: 다음 분 정각에 2차 수집
+        print(f"[→] 2차 수집 예정: {next_mark.strftime('%H:%M:%S')}")
         scheduler.add_job(
             fetch_and_update, 'date',
             run_date=next_mark,
             max_instances=1,
-            id=f'fetch_once_{completed_count + 1}'
+            id='fetch_once_2'
         )
-    else:
-        # 3차 완료: 다음 분 정각 + 10분 뒤부터 10분 간격 반복
+    elif completed_count == 2:
+        # 2차 완료: 다음 분 정각 + 10분 뒤부터 10분 간격 반복
         interval_start = next_mark + timedelta(minutes=10)
         print(f"[→] 10분 간격 시작: {interval_start.strftime('%H:%M:%S')} (이후 매 10분)")
         scheduler.add_job(
