@@ -310,28 +310,49 @@ if __name__ == "__main__":
 
     now = datetime.now(KST)
 
-    # 다음 10분 정각 계산
+    def next_minute_mark(dt):
+        return (dt + timedelta(minutes=1)).replace(second=0, microsecond=0)
+
     def next_10min_mark(dt):
         next_m = ((dt.minute // 10) + 1) * 10
         if next_m >= 60:
             return (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         return dt.replace(minute=next_m, second=0, microsecond=0)
 
-    first_sync = next_10min_mark(now)
-    print(f"📡 첫 수집 예정 (다음 10분 정각): {first_sync.strftime('%H:%M:%S')}")
+    # ① 다음 분 00초에 첫 수집 (예: 16:37:24 시작 → 16:38:00 첫수집)
+    first_sync  = next_minute_mark(now)
+    # ② 그 다음 분 00초에 두번째 수집 (예: 16:39:00)
+    second_sync = next_minute_mark(first_sync)
 
-    # 모든 수집을 10분 정각에만 실행 (:00, :10, :20, :30, :40, :50)
+    print(f"📡 [1] 첫 수집 예정:   {first_sync.strftime('%H:%M:%S')}")
+    print(f"📡 [2] 두번째 수집 예정: {second_sync.strftime('%H:%M:%S')}")
+
+    # 두번째 수집 후 → 10분 정각마다 반복 등록
+    def second_fetch_then_schedule():
+        fetch_and_update()
+        third_sync = next_10min_mark(datetime.now(KST))
+        print(f"📡 [3~] 이후 10분 정각 수집: {third_sync.strftime('%H:%M:%S')}")
+        scheduler.add_job(
+            fetch_and_update, 'cron',
+            minute='0,10,20,30,40,50', second=0,
+            start_date=third_sync,
+            max_instances=1, coalesce=True,
+            id='fetch_10min'
+        )
+
     scheduler.add_job(
-        fetch_and_update, 'cron', minute='0,10,20,30,40,50',
-        start_date=first_sync, max_instances=1, coalesce=True,
-        id='fetch_10min'
+        fetch_and_update, 'date',
+        run_date=first_sync, max_instances=1
+    )
+    scheduler.add_job(
+        second_fetch_then_schedule, 'date',
+        run_date=second_sync, max_instances=1
     )
 
-    # 분봉 기록: 매 1분 정각
-    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    # 분봉 기록: 매 1분 00초
     scheduler.add_job(
         record_minute_candle, 'interval', minutes=1,
-        start_date=next_minute
+        start_date=first_sync
     )
 
     scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
