@@ -282,28 +282,26 @@ def fetch_and_update():
                 success += 1
                 continue
 
-            # 네이버 변화량 → %
+            # 네이버 변화량 → % (선형: 1건=0.2%, 10건=2%, 100건=20%)
             naver_diff = naver_score - baseline
             if naver_diff == 0:
-                naver_yield = random.choice([1, -1]) * random.uniform(0.001, 0.0025)
-            elif naver_diff > 0:
-                naver_yield =  random.uniform(0.003, 0.008) + (naver_diff * 0.15)
+                naver_yield = random.choice([1, -1]) * random.uniform(0.001, 0.0015)
             else:
-                naver_yield = -random.uniform(0.003, 0.008) + (naver_diff * 0.15)
+                base        = random.uniform(0.001, 0.002)
+                naver_yield = (naver_diff * 0.002) + (base * (1 if naver_diff > 0 else -1))
 
-            # 구글 변화량 → % (1점 = 0.5%)
+            # 구글 변화량 → % (선형: 1pt=0.25%, 10pt=2.5%, 40pt=10%)
             g_baseline_val = google_baseline.get(search_query, g_current)
             g_diff         = g_current - g_baseline_val
             if g_diff == 0:
-                google_yield = random.choice([1, -1]) * random.uniform(0.002, 0.006)
-            elif g_diff > 0:
-                google_yield =  random.uniform(0.002, 0.006) + (g_diff * 0.005)
+                google_yield = random.choice([1, -1]) * random.uniform(0.001, 0.0015)
             else:
-                google_yield = -random.uniform(0.002, 0.006) + (g_diff * 0.005)
+                base         = random.uniform(0.001, 0.002)
+                google_yield = (g_diff * 0.0025) + (base * (1 if g_diff > 0 else -1))
 
-            # 네이버 60% + 구글 40% 가중 합산
-            target_yield = (naver_yield * 0.6) + (google_yield * 0.4)
-            target_yield = float(np.clip(target_yield, -0.25, 0.25))
+            # 평균, 최대 +-30%
+            target_yield = (naver_yield + google_yield) / 2.0
+            target_yield = float(np.clip(target_yield, -0.30, 0.30))
 
             updates_db[ticker] = {
                 'baseline':       naver_score,
