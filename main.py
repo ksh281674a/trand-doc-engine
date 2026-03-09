@@ -48,6 +48,7 @@ TICKER_KEYS     = list(SEARCH_MAPPING.keys())
 ohlc_buffer     = {}
 tick_state      = {}
 candle_snapshot = {}   # :57초 봉 마감 스냅샷
+candle_mode     = {}   # 분봉 방향 모드: 'normal' or 'reverse' (음봉 확정)
 fetch_count     = 0    # 수집 완료 횟수
 
 # ---------------------------------------------------------
@@ -89,30 +90,33 @@ def generate_ticks():
                 convergence_strength = 0.15 + convergence_ratio * 0.25   # 0.15 ~ 0.40
                 ideal_step           = (distance / remaining_sec) * convergence_strength
 
-                # ★ 방향 결정: 오르락내리락 강화, 일방통행 방지
+                # ★ 방향 결정: candle_mode로 분봉 단위 음봉 확정
                 state   = tick_state.get(ticker, {'counter': 0, 'dir': 1})
                 counter = state['counter']
                 cur_dir = state['dir']
+                mode    = candle_mode.get(ticker, 'normal')
 
                 if counter <= 0:
                     rand = random.random()
 
-                    # 수렴 근처(0.2% 이내): 50/50 진동
                     if abs_dist < 0.002:
+                        # 수렴 근처: 50/50 진동
                         cur_dir = 1 if rand < 0.50 else -1
                         counter = random.randint(1, 2)
+                    elif mode == 'reverse':
+                        # 음봉 확정 구간: 역방향으로만 이동
+                        cur_dir = -1 if distance > 0 else 1
+                        counter = random.randint(2, 4)
                     else:
-                        # 목표 방향 55% (원본 58%보다 낮춤 → 역방향 더 자주)
+                        # 일반 구간: 목표 방향 65%
                         if distance > 0:
-                            cur_dir = 1 if rand < 0.55 else -1
+                            cur_dir = 1 if rand < 0.65 else -1
                         elif distance < 0:
-                            cur_dir = -1 if rand < 0.55 else 1
+                            cur_dir = -1 if rand < 0.65 else 1
                         else:
                             cur_dir = 1 if rand < 0.50 else -1
-
-                        # 주 방향 1~3틱, 역방향도 1~2틱 (오르락내리락 강화)
                         same_dir = (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0)
-                        counter  = random.randint(1, 3) if same_dir else random.randint(1, 2)
+                        counter  = random.randint(2, 4) if same_dir else random.randint(1, 2)
 
                     tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
                 else:
@@ -120,17 +124,24 @@ def generate_ticks():
 
                 # ★ 이동량: max_step 직접 사용 (ideal_step 미사용)
                 volatility = 0.00080 + abs_dist * 0.010
-                max_step   = max(0.00015, abs_dist * 0.045)
+                max_step   = max(0.00010, abs_dist * 0.012)
 
                 if abs_dist < 0.002:
+                    # 수렴 근처: 작은 진동 (50/50)
                     move = cur_dir * abs(np.random.normal(0, volatility * 1.5))
+                    move = float(np.clip(move, -max_step, max_step))
                 else:
-                    # max_step 기준 직접 이동 — 10분(600틱) 약 93% 수렴
-                    move = cur_dir * max_step * random.uniform(0.6, 1.0) \
-                           + np.random.normal(0, volatility * 0.3)
-
-                move = float(np.clip(move, -max_step, max_step))
-
+                    # ★ 주방향/역방향 이동폭 비대칭
+                    #   주방향(수렴): abs_dist * 0.014 → 계단식 수렴
+                    #   역방향(반등): abs_dist * 0.007 → 중간 음봉/양봉 자연스럽게
+                    same_dir_move = (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0)
+                    if same_dir_move:
+                        step = abs_dist * 0.014 * random.uniform(0.7, 1.0)
+                        step = min(step, abs(distance))
+                    else:
+                        step = abs_dist * 0.007 * random.uniform(0.6, 1.0)
+                    move = cur_dir * step + np.random.normal(0, volatility * 0.2)
+                    move = float(np.clip(move, -max_step, max_step))
                 # target 초과 방지
                 projected = current + move
                 if distance > 0 and projected > target:
@@ -203,7 +214,11 @@ def record_minute_candle():
                 'open':  close_price, 'high': close_price,
                 'low':   close_price, 'close': close_price
             }
-            tick_state[ticker]     = {'counter': 0, 'dir': 1}
+            tick_state[ticker] = {'counter': 0, 'dir': 1}
+
+            # ★ 다음 분봉 모드 결정: 30% 확률로 음봉 확정
+            candle_mode[ticker] = 'reverse' if random.random() < 0.30 else 'normal'
+
             current_updates[f'{ticker}/current_yield'] = close_price
 
         candle_snapshot.clear()
@@ -381,7 +396,8 @@ def initialize_app():
             'last_update_ts': now_ts
         }
         ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
-        tick_state[ticker]  = {'counter': 0, 'dir': 1}
+        tick_state[ticker]   = {'counter': 0, 'dir': 1}
+        candle_mode[ticker]  = 'normal'
     db.reference('chart_data/trends').set(updates)
     db.reference('chart_data/live_data').set({})
     candle_snapshot.clear()
