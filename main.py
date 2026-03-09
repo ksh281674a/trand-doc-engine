@@ -66,7 +66,6 @@ def generate_ticks():
             try:
                 target  = data.get('target_yield', 0.0)
 
-                # ohlc_buffer가 있으면 거기서 current 읽기 (Firebase sync 지연 무시)
                 if ticker in ohlc_buffer:
                     current = ohlc_buffer[ticker]['close']
                 else:
@@ -81,44 +80,57 @@ def generate_ticks():
                 remaining_sec = max(5, 600 - elapsed_sec)
                 distance      = target - current
 
-                convergence_ratio    = (600 - remaining_sec) / 600
-                convergence_strength = 1.0 + convergence_ratio * 2.0
-                ideal_step = (distance / remaining_sec) * convergence_strength
+                # 이번 분봉 방향 (candle_dir): 분봉 시작 시 결정, 유지됨
+                state      = tick_state.get(ticker, {})
+                candle_dir = state.get('candle_dir', None)
+                counter    = state.get('counter', 0)
+                cur_dir    = state.get('cur_dir', 1)
 
-                # 틱 방향 상태
-                state   = tick_state.get(ticker, {'counter': 0, 'dir': 1})
-                counter = state['counter']
-                cur_dir = state['dir']
-
-                if counter <= 0:
-                    rand = random.random()
-                    if distance > 0:
-                        cur_dir = 1 if rand < 0.58 else -1
-                    elif distance < 0:
-                        cur_dir = -1 if rand < 0.58 else 1
+                # candle_dir 이 없으면 지금 설정 (분봉 첫 틱)
+                if candle_dir is None:
+                    main_dir = 1 if distance >= 0 else -1
+                    # 25% 확률로 반대 봉 (수렴 여유 있을 때만)
+                    if abs(distance) > 0.002 and random.random() < 0.25:
+                        candle_dir = -main_dir
                     else:
-                        cur_dir = 1 if rand < 0.50 else -1
-                    # 주 방향: 1~2틱, 반대 방향: 1틱 (매우 자주 전환)
-                    if (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0):
+                        candle_dir = main_dir
+                    cur_dir = candle_dir
+                    counter = random.randint(1, 2)
+                    tick_state[ticker] = {'candle_dir': candle_dir, 'cur_dir': cur_dir, 'counter': counter}
+
+                # 분봉 내 오르락내리락
+                if counter <= 0:
+                    if random.random() < 0.55:
+                        cur_dir = candle_dir       # 주 방향 55%
                         counter = random.randint(1, 2)
                     else:
+                        cur_dir = -candle_dir      # 반대 방향 45%
                         counter = 1
-                    tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
+                    tick_state[ticker] = {'candle_dir': candle_dir, 'cur_dir': cur_dir, 'counter': counter}
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                volatility = 0.00060 + abs(distance) * 0.012
+                # 이동량 계산
+                convergence_strength = 1.0 + ((600 - remaining_sec) / 600) * 2.0
+                ideal_step = (distance / remaining_sec) * convergence_strength
+                volatility = 0.00050 + abs(distance) * 0.010
 
                 if abs(distance) < 0.0003:
-                    move = np.random.normal(0, volatility * 1.5)
+                    move = np.random.normal(0, volatility)
                 else:
-                    base = abs(ideal_step) * random.uniform(2.0, 4.5)
-                    move = cur_dir * base + np.random.normal(0, volatility * 0.3)
+                    base = abs(ideal_step) * random.uniform(1.8, 3.5)
+                    move = cur_dir * base
 
-                max_step = max(0.0008, abs(distance) * 0.40)
-                move = float(np.clip(move, -max_step, max_step))
+                # 반대 봉 분봉이어도 수렴은 보장:
+                # 반대 방향 이동량은 남은 거리의 20% 이하로 제한
+                if cur_dir != (1 if distance >= 0 else -1):
+                    max_counter_move = max(0.0005, abs(distance) * 0.20)
+                    move = float(np.clip(move, -max_counter_move, max_counter_move))
+                else:
+                    max_step = max(0.0008, abs(distance) * 0.45)
+                    move = float(np.clip(move, -max_step, max_step))
 
-                # target 초과 방지
+                # target 절대 초과 금지
                 projected = current + move
                 if distance > 0 and projected > target:
                     move = target - current
@@ -178,7 +190,7 @@ def record_minute_candle():
                     'open':  close_price, 'high': close_price,
                     'low':   close_price, 'close': close_price
                 }
-                tick_state[ticker] = {'counter': 0, 'dir': 1}
+                tick_state[ticker] = {'candle_dir': None, 'cur_dir': 1, 'counter': 0}
 
                 # Firebase current_yield도 close_price로 맞춤 (틱 엔진 sync)
                 current_updates[f'{ticker}/current_yield'] = close_price
@@ -342,16 +354,25 @@ if __name__ == "__main__":
     print(f"[1] 첫 수집 예정:    {first_sync.strftime('%H:%M:%S')}")
     print(f"[2] 두번째 수집 예정: {second_sync.strftime('%H:%M:%S')}")
 
+    def schedule_next_fetch(run_date):
+        """10분 뒤 fetch 예약 (재귀적으로 반복)"""
+        def fetch_and_reschedule():
+            fetch_and_update()
+            next_run = datetime.now(KST) + timedelta(minutes=10)
+            print(f"[다음 수집 예정] {next_run.strftime('%H:%M:%S')}")
+            schedule_next_fetch(next_run)
+        scheduler.add_job(
+            fetch_and_reschedule, 'date',
+            run_date=run_date,
+            max_instances=1, id=f'fetch_{int(run_date.timestamp())}',
+            misfire_grace_time=60
+        )
+
     def second_fetch_then_schedule():
         fetch_and_update()
-        third_sync = second_sync + timedelta(minutes=10)
+        third_sync = datetime.now(KST) + timedelta(minutes=10)
         print(f"[3~] 이후 10분 간격: {third_sync.strftime('%H:%M:%S')} 부터")
-        scheduler.add_job(
-            fetch_and_update, 'interval', minutes=10,
-            start_date=third_sync,
-            max_instances=1, coalesce=True,
-            id='fetch_10min'
-        )
+        schedule_next_fetch(third_sync)
 
     scheduler.add_job(fetch_and_update,           'date', run_date=first_sync,  max_instances=1)
     scheduler.add_job(second_fetch_then_schedule, 'date', run_date=second_sync, max_instances=1)
