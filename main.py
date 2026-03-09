@@ -50,32 +50,39 @@ tick_state  = {}
 
 # ---------------------------------------------------------
 # 3. 틱 엔진
+# target/last_update_ts 로컬 캐시 (Firebase 읽기 지연으로 인한 점프 방지)
+local_target_cache = {}  # {ticker: {'target': float, 'last_update_ts': int}}
+
 # ---------------------------------------------------------
 def generate_ticks():
     try:
-        ref = db.reference('chart_data/trends')
-        all_trends = ref.get()
-        if not all_trends:
-            return
-
         updates_trends = {}
         updates_live   = {}
         now_ts = int(time.time())
 
-        for ticker, data in all_trends.items():
+        # 로컬 캐시가 비어있을 때만 Firebase에서 읽기
+        if not local_target_cache:
+            all_trends = db.reference('chart_data/trends').get()
+            if not all_trends:
+                return
+            for ticker, data in all_trends.items():
+                local_target_cache[ticker] = {
+                    'target':         data.get('target_yield', 0.0),
+                    'last_update_ts': data.get('last_update_ts', now_ts - 600)
+                }
+
+        for ticker in TICKER_KEYS:
             try:
-                target  = data.get('target_yield', 0.0)
+                cache  = local_target_cache.get(ticker, {'target': 0.0, 'last_update_ts': now_ts - 600})
+                target = cache['target']
+                last_update_ts = cache['last_update_ts']
 
                 if ticker in ohlc_buffer:
                     current = ohlc_buffer[ticker]['close']
                 else:
-                    current = data.get('current_yield', 0.0)
-                    ohlc_buffer[ticker] = {
-                        'open': current, 'high': current,
-                        'low':  current, 'close': current
-                    }
+                    ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
+                    current = 0.0
 
-                last_update_ts = data.get('last_update_ts', now_ts - 600)
                 elapsed_sec   = now_ts - last_update_ts
                 remaining_sec = max(5, 600 - elapsed_sec)
                 distance      = target - current
@@ -86,10 +93,8 @@ def generate_ticks():
                 counter    = state.get('counter', 0)
                 cur_dir    = state.get('cur_dir', 1)
 
-                # candle_dir 이 없으면 지금 설정 (분봉 첫 틱)
                 if candle_dir is None:
                     main_dir = 1 if distance >= 0 else -1
-                    # 25% 확률로 반대 봉 (수렴 여유 있을 때만)
                     if abs(distance) > 0.002 and random.random() < 0.25:
                         candle_dir = -main_dir
                     else:
@@ -98,31 +103,26 @@ def generate_ticks():
                     counter = random.randint(1, 2)
                     tick_state[ticker] = {'candle_dir': candle_dir, 'cur_dir': cur_dir, 'counter': counter}
 
-                # 분봉 내 오르락내리락
                 if counter <= 0:
                     if random.random() < 0.55:
-                        cur_dir = candle_dir       # 주 방향 55%
+                        cur_dir = candle_dir
                         counter = random.randint(1, 2)
                     else:
-                        cur_dir = -candle_dir      # 반대 방향 45%
+                        cur_dir = -candle_dir
                         counter = 1
                     tick_state[ticker] = {'candle_dir': candle_dir, 'cur_dir': cur_dir, 'counter': counter}
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                # 이동량 계산
                 convergence_strength = 1.0 + ((600 - remaining_sec) / 600) * 2.0
                 ideal_step = (distance / remaining_sec) * convergence_strength
-                volatility = 0.00050 + abs(distance) * 0.010
 
                 if abs(distance) < 0.0003:
-                    move = np.random.normal(0, volatility)
+                    move = np.random.normal(0, 0.0003)
                 else:
                     base = abs(ideal_step) * random.uniform(1.8, 3.5)
                     move = cur_dir * base
 
-                # 반대 봉 분봉이어도 수렴은 보장:
-                # 반대 방향 이동량은 남은 거리의 20% 이하로 제한
                 if cur_dir != (1 if distance >= 0 else -1):
                     max_counter_move = max(0.0005, abs(distance) * 0.20)
                     move = float(np.clip(move, -max_counter_move, max_counter_move))
@@ -130,7 +130,6 @@ def generate_ticks():
                     max_step = max(0.0008, abs(distance) * 0.45)
                     move = float(np.clip(move, -max_step, max_step))
 
-                # target 절대 초과 금지
                 projected = current + move
                 if distance > 0 and projected > target:
                     move = target - current
@@ -269,6 +268,12 @@ def fetch_and_update():
             updates_db[f'{ticker}/target_yield']   = target_yield
             updates_db[f'{ticker}/last_update_ts'] = now_ts
 
+            # 로컬 캐시도 즉시 업데이트 (틱 엔진이 바로 새 target 사용)
+            local_target_cache[ticker] = {
+                'target':         target_yield,
+                'last_update_ts': now_ts
+            }
+
             print(
                 f" {ticker.ljust(10)}: {target_yield * 100:>+6.2f}%"
                 f"  (전:{int(baseline):,} -> 현:{int(naver_score):,} | 증감:{int(diff):+}건)"
@@ -335,7 +340,7 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
-    delay    = random.uniform(0.5, 1.5)
+    delay    = random.uniform(0.3, 0.8)
     next_run = datetime.now(KST) + timedelta(seconds=delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
