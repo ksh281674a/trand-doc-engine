@@ -296,26 +296,46 @@ def run_ticks():
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
 
+def fetch_once_then_schedule_10min():
+    """
+    1분 뒤 1회 수집 후, 이후부터 10분 간격으로 전환
+    흐름: 시작즉시수집 → 1분뒤수집 → 10분마다수집(반복)
+    """
+    fetch_and_update()
+    now = datetime.now(KST)
+    next_10min = now + timedelta(minutes=10)
+    print(f"📡 이후 10분 간격 수집. 다음 예정: {next_10min.strftime('%H:%M:%S')}")
+    scheduler.add_job(
+        fetch_and_update, 'interval', minutes=10,
+        start_date=next_10min, max_instances=1, coalesce=True,
+        id='fetch_10min'
+    )
+
+
 if __name__ == "__main__":
     initialize_app()
 
-    # 시작 즉시 첫 수집 실행
-    print("📡 첫 수집 즉시 시작...")
+    now = datetime.now(KST)
+
+    # ① 시작 즉시 1회 수집
+    print("📡 [1] 시작 즉시 첫 수집...")
     fetch_and_update()
 
-    # 이후 다음 정각부터 1분 간격으로 반복
-    now            = datetime.now(KST)
-    next_sync_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-    print(f"📡 다음 정각 수집 예정: {next_sync_time.strftime('%H:%M:%S')}")
-
+    # ② 1분 뒤 1회 수집 → 그 이후부터 10분 간격으로 자동 전환
+    one_min_later = now + timedelta(minutes=1)
+    print(f"📡 [2] 1분 뒤 수집 예정: {one_min_later.strftime('%H:%M:%S')}")
     scheduler.add_job(
-        fetch_and_update, 'interval', minutes=1,
-        start_date=next_sync_time, max_instances=1, coalesce=True
+        fetch_once_then_schedule_10min, 'date',
+        run_date=one_min_later, max_instances=1
     )
+
+    # 분봉 기록: 매 1분 정각
+    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     scheduler.add_job(
         record_minute_candle, 'interval', minutes=1,
-        start_date=next_sync_time
+        start_date=next_minute
     )
+
     scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
 
     run_ticks()
