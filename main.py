@@ -169,8 +169,9 @@ def record_minute_candle():
         if not ohlc_buffer:
             return
 
-        history_updates  = {}
-        current_updates  = {}
+        history_updates = {}
+        trend_updates   = {}
+        live_updates    = {}
 
         for ticker in TICKER_KEYS:
             candle = ohlc_buffer.get(ticker)
@@ -184,18 +185,26 @@ def record_minute_candle():
                     'low':   candle['low'],   'close': close_price
                 })
 
-                # ohlc_buffer 초기화 (다음 분봉 open = 직전 close)
+                # ohlc_buffer 초기화 (다음 분봉 open = 직전 close, 갭 없음)
                 ohlc_buffer[ticker] = {
                     'open':  close_price, 'high': close_price,
                     'low':   close_price, 'close': close_price
                 }
                 tick_state[ticker] = {'candle_dir': None, 'cur_dir': 1, 'counter': 0}
 
-                # Firebase current_yield도 close_price로 맞춤 (틱 엔진 sync)
-                current_updates[f'{ticker}/current_yield'] = close_price
+                # trends, live_data 동시에 업데이트 (점프 방지)
+                trend_updates[f'{ticker}/current_yield'] = close_price
+                live_updates[ticker] = {
+                    'time':  ts,
+                    'open':  close_price, 'high': close_price,
+                    'low':   close_price, 'close': close_price
+                }
 
-        if current_updates:
-            db.reference('chart_data/trends').update(current_updates)
+        # 한 번에 모두 업데이트
+        if trend_updates:
+            db.reference('chart_data/trends').update(trend_updates)
+        if live_updates:
+            db.reference('chart_data/live_data').update(live_updates)
 
     except Exception as e:
         print(f"record_minute_candle 에러: {e}")
@@ -321,16 +330,37 @@ def daily_reset():
 # ---------------------------------------------------------
 def initialize_app():
     print("초기화 중...")
+    now_ts = int(time.time())
+
+    # 기존 Firebase 데이터 읽기 (재시작 시 보존)
+    existing = db.reference('chart_data/trends').get() or {}
+
     updates = {}
-    now_ts  = int(time.time())
     for ticker in TICKER_KEYS:
-        updates[ticker] = {
-            'baseline': 0, 'last_score': 0,
-            'target_yield': 0.0, 'current_yield': 0.0,
-            'last_update_ts': now_ts
+        data = existing.get(ticker, {})
+        baseline = data.get('baseline', 0)
+
+        # ohlc_buffer: 기존 current_yield 값으로 복구
+        current = data.get('current_yield', 0.0)
+        ohlc_buffer[ticker] = {
+            'open': current, 'high': current,
+            'low':  current, 'close': current
         }
-        ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
-    db.reference('chart_data/trends').set(updates)
+        tick_state[ticker] = {'candle_dir': None, 'cur_dir': 1, 'counter': 0}
+
+        # Firebase는 기존 데이터가 있으면 건드리지 않음
+        if baseline == 0:
+            updates[ticker] = {
+                'baseline': 0, 'last_score': 0,
+                'target_yield': 0.0, 'current_yield': 0.0,
+                'last_update_ts': now_ts
+            }
+            print(f"  {ticker}: 신규 초기화")
+        else:
+            print(f"  {ticker}: 기존 데이터 유지 (baseline={int(baseline):,})")
+
+    if updates:
+        db.reference('chart_data/trends').update(updates)
 
 
 # ---------------------------------------------------------
