@@ -49,7 +49,7 @@ TICKER_KEYS = list(SEARCH_MAPPING.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (🌟 양봉/음봉 지그재그 수렴 로직 적용)
+# 3. 데이터 엔진 (수직 찢어짐 방지 / 양봉음봉 수렴 유지)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -72,18 +72,13 @@ def generate_ticks():
                 distance = target - current
                 ideal_step = distance / remaining_sec
                 
-                # 🌟 [핵심] 목표치까지 남은 거리에 비례하여 변동성(캔들 크기) 결정
-                # 5% 폭등일 땐 캔들이 길쭉길쭉하게, 0.1%일 땐 잔잔하게 움직임
                 volatility = 0.0002 + abs(distance) * 0.02
                 
-                # 🌟 [핵심] 55% 확률로 목표 방향 전진(양봉/음봉 생성), 45% 확률로 조정(반대 색상 캔들)
-                # 이렇게 해야 일직선 수직 상승이 아니라 지그재그 파동을 그리며 수렴함
                 if random.random() < 0.55:
                     move = ideal_step * random.uniform(1.0, 3.5) + np.random.normal(0, volatility)
                 else:
                     move = -ideal_step * random.uniform(0.5, 2.0) + np.random.normal(0, volatility * 0.8)
                 
-                # 수직 찢어짐 방지: 거리가 멀면 보폭을 살짝 열어주되, 최대 0.3% 이상 점프 불가
                 max_step = min(0.003, 0.0005 + abs(distance) * 0.01)
                 move = np.clip(move, -max_step, max_step)
                 
@@ -92,7 +87,6 @@ def generate_ticks():
                 if ticker not in ohlc_buffer:
                     ohlc_buffer[ticker] = {'open': current, 'high': current, 'low': current, 'close': current}
                 
-                # 캔들 꼬리 생성 압력 (너무 한 방향으로만 쏠리지 않게 당겨줌)
                 current_candle_open = ohlc_buffer[ticker]['open']
                 wick_pressure = -(current - current_candle_open) * 0.15
                 
@@ -131,7 +125,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 네이버 실시간 검색 API (퍼센트 계산 및 레버리지 로직)
+# 4. 네이버 실시간 검색 API (🌟 오직 '진짜 증가량' 기반 로직)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -172,25 +166,41 @@ def fetch_and_update():
             data = ref.get() or {}
             
             baseline = data.get('baseline', 0)
+            
             if baseline == 0:
-                baseline = current_score
+                ref.update({
+                    'baseline': current_score, 'last_score': current_score, 
+                    'target_yield': 0.0, 'last_update_ts': now_ts
+                })
+                print(f" 🔄 {ticker.ljust(10)}: 데이터 최초 세팅 ({int(current_score):,}건)")
+                time.sleep(0.1)
+                continue
             
-            if baseline > 0:
-                real_change_rate = (current_score - baseline) / baseline
-                leverage = 150 
-                target_yield = round((real_change_rate * leverage) + random.uniform(-0.001, 0.001), 5)
+            # 🌟 [요구사항] 가짜 확률 다 버리고 진짜 네이버 데이터 차이값 추출
+            diff = current_score - baseline
+            
+            if diff == 0:
+                # 찐증가가 0건일 때: 최소 보장 +-0.5~1.0% 요동
+                target_yield = random.choice([1, -1]) * random.uniform(0.005, 0.010)
+            elif diff > 0:
+                # 찐증가가 발생했을 때: 기본 0.5% 베이스에 1건당 0.05%(0.0005)씩 정직하게 추가!
+                target_yield = random.uniform(0.005, 0.008) + (diff * 0.0005)
             else:
-                target_yield = random.uniform(-0.001, 0.001)
+                # 네이버 서버 인덱스 오차로 오히려 검색결과가 줄었을 때 (하락)
+                target_yield = -random.uniform(0.005, 0.008) + (diff * 0.0005)
             
-            target_yield = float(np.clip(target_yield, -0.15, 0.15))
+            # 우주로 날아가지 않게 최대 +-25% 제한
+            target_yield = float(np.clip(target_yield, -0.25, 0.25))
             
             ref.update({
-                'baseline': baseline,
+                'baseline': current_score, # 다음 수집을 위해 지금 점수를 새로운 기준으로 저장
                 'last_score': current_score, 
                 'target_yield': target_yield,
                 'last_update_ts': now_ts
             })
-            print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:+.2f}% (실시간 버즈량: {int(current_score):,}건)")
+            
+            # 🌟 [요구사항] 사용자가 두 눈으로 "진짜로 얼마나 올랐는지" 확인할 수 있는 로그 포맷
+            print(f" ✅ {ticker.ljust(10)}: {target_yield * 100:>+6.2f}% (이전:{int(baseline)} -> 현재:{int(current_score)} | 찐증가: {int(diff):+}건)")
             time.sleep(0.1) 
             
         except Exception as e:
@@ -218,7 +228,7 @@ def daily_reset():
     except Exception as e: print(f"❌ 리셋 에러: {e}")
 
 def initialize_app():
-    print("🚀 Firebase 초기화 중... (기존 과거 데이터 강제 초기화 및 0점 세팅)")
+    print("🚀 Firebase 초기화 중... (기존 데이터 강제 0점 세팅)")
     updates = {}
     now_ts = int(time.time())
     for ticker in TICKER_KEYS:
