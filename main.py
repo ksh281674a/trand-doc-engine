@@ -5,20 +5,12 @@ import random
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
+import urllib.parse
+import requests  # 🌟 말썽쟁이 라이브러리 대신 안정적인 직접 통신 사용
 import firebase_admin
 from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
-
-# 🌟 Python 3.10+ 호환성 패치 (유지)
-import collections
-if not hasattr(collections, 'Mapping'):
-    import collections.abc
-    collections.Mapping = collections.abc.Mapping
-    collections.MutableMapping = collections.abc.MutableMapping
-    collections.Sequence = collections.abc.Sequence
-
-import pageviewapi 
 
 app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
@@ -88,7 +80,7 @@ def generate_ticks():
                 else:
                     move = -ideal_step * random.uniform(0.7, 1.5)
                 
-                # 보폭 제한
+                # 🌟 [안정 장치 유지] 캔들 찢어짐 방지 보폭 제한
                 move = np.clip(move, -0.0012, 0.0012)
                 
                 shiver = np.random.normal(0, 0.0011) 
@@ -134,7 +126,7 @@ def record_minute_candle():
         print(f"❌ record_minute_candle 에러: {e}")
 
 # ---------------------------------------------------------
-# 4. 위키피디아 수집 로직 (바꿀 것만 정확히 수정)
+# 4. 위키피디아 직접 통신 수집 로직 (에러 원천 차단)
 # ---------------------------------------------------------
 def fetch_and_update():
     now = datetime.now(KST)
@@ -148,24 +140,36 @@ def fetch_and_update():
     if not current_group_tickers: return
 
     print(f"\n──────────────── 그룹 {group_idx} 위키 수집 시작 ────────────────")
-    target_date = (now - timedelta(days=1)).strftime('%Y%m%d')
+    # 위키피디아 API 날짜 포맷 (YYYYMMDD00)
+    target_date = (now - timedelta(days=1)).strftime('%Y%m%d00')
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     
     for ticker in current_group_tickers:
         try:
             wiki_title = WIKI_MAPPING[ticker]
+            # 한국어 위키백과 URL에 맞게 한글 인코딩
+            encoded_title = urllib.parse.quote(wiki_title, safe='')
             
-            # 🌟 [에러 완벽 수정] 올바른 pageviewapi 함수와 응답 처리
-            res = pageviewapi.per_article('ko.wikipedia', wiki_title, target_date, target_date, access='all-access', agent='all-agents', granularity='daily')
+            # 🌟 외부 라이브러리 없이 위키피디아 API와 직접 통신
+            url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/ko.wikipedia/all-access/all-agents/{encoded_title}/daily/{target_date}/{target_date}"
             
-            # API 응답 구조 (res['items'][0]['views'])에서 조회수를 빼옵니다.
-            if 'items' in res and len(res['items']) > 0:
-                current_score = float(res['items'][0]['views'])
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                json_data = response.json()
+                if 'items' in json_data and len(json_data['items']) > 0:
+                    current_score = float(json_data['items'][0]['views'])
+                else:
+                    current_score = 0.0
             else:
-                current_score = 0.0
+                # 404 에러 등 문서가 없거나 실패 시
+                print(f" ❌ {ticker.ljust(10)} 위키 API 응답 에러: {response.status_code}")
+                continue
             
             ref = db.reference(f'chart_data/trends/{ticker}')
             data = ref.get() or {}
             
+            # [동적 점수 반영] baseline이 0이면 첫 수집값을 기준으로 설정
             baseline = data.get('baseline', 0)
             if baseline == 0:
                 baseline = current_score
@@ -182,7 +186,7 @@ def fetch_and_update():
             time.sleep(0.1) 
             
         except Exception as e:
-            print(f" ❌ {ticker.ljust(10)} 위키 수집 실패: {e}")
+            print(f" ❌ {ticker.ljust(10)} 네트워크/통신 실패: {e}")
             continue
             
     print(f"──────────────── 그룹 {group_idx} 수집 완료 ────────────────")
@@ -222,6 +226,7 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     generate_ticks()
+    # 🌟 랜덤 들썩임 주기 (0.5초 ~ 1.5초) 유지
     next_run_delay = random.uniform(0.5, 1.5)
     next_run = datetime.now(KST) + timedelta(seconds=next_run_delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
