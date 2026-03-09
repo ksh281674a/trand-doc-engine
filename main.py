@@ -11,6 +11,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
+from pytrends.request import TrendReq
 
 app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
@@ -85,36 +86,36 @@ def generate_ticks():
                 counter = state['counter']
                 cur_dir = state['dir']
 
-                # 3~6틱마다 방향 전환 (단, 주 방향은 반대보다 더 많이 감)
+                # 1~3틱마다 방향 전환 (매우 자주, 격렬하게)
                 if counter <= 0:
                     rand = random.random()
                     if distance > 0:
-                        cur_dir = 1 if rand < 0.65 else -1
+                        cur_dir = 1 if rand < 0.62 else -1
                     elif distance < 0:
-                        cur_dir = -1 if rand < 0.65 else 1
+                        cur_dir = -1 if rand < 0.62 else 1
                     else:
                         cur_dir = 1 if rand < 0.50 else -1
-                    # 주 방향: 2~4틱, 반대 방향: 1~3틱 (더 자주 전환)
+                    # 주 방향: 1~3틱, 반대 방향: 1~2틱
                     if (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0):
-                        counter = random.randint(2, 4)
-                    else:
                         counter = random.randint(1, 3)
+                    else:
+                        counter = random.randint(1, 2)
                     tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
                 # ── 이동량 계산 ──────────────────────────────────────────
-                volatility = 0.00020 + abs(distance) * 0.006
+                volatility = 0.00035 + abs(distance) * 0.008
 
                 if abs(distance) < 0.0003:
-                    move = np.random.normal(0, volatility * 0.8)
+                    move = np.random.normal(0, volatility * 1.2)
                 else:
-                    base  = abs(ideal_step) * random.uniform(1.2, 3.0)
+                    base  = abs(ideal_step) * random.uniform(1.5, 3.5)
                     noise = np.random.normal(0, volatility)
                     move  = cur_dir * base + noise
 
                 # 한 틱 최대 이동 제한
-                max_step = max(0.0005, abs(distance) * 0.35)
+                max_step = max(0.0008, abs(distance) * 0.40)
                 move = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
@@ -188,68 +189,125 @@ def record_minute_candle():
 
 
 # ---------------------------------------------------------
-# 4. 네이버 수집: 매 1분마다 34개 전체
+# 4. 구글 트렌드 수집
+# ---------------------------------------------------------
+def fetch_google_trends(keywords):
+    """
+    keywords: list of str (한국어 검색어)
+    반환: {keyword: score(0~100)}
+    pytrends는 5개씩 묶어서 요청
+    """
+    result = {}
+    try:
+        pytrends = TrendReq(hl='ko', tz=540, timeout=(10, 25))
+        for i in range(0, len(keywords), 5):
+            chunk = keywords[i:i+5]
+            try:
+                pytrends.build_payload(chunk, timeframe='now 1-H', geo='KR')
+                df = pytrends.interest_over_time()
+                if df is not None and not df.empty:
+                    for kw in chunk:
+                        result[kw] = float(df[kw].iloc[-1]) if kw in df.columns else 0.0
+                else:
+                    for kw in chunk:
+                        result[kw] = 0.0
+                time.sleep(random.uniform(1.5, 3.0))
+            except Exception as e:
+                print(f"  ⚠ 구글트렌드 청크 실패 {chunk}: {e}")
+                for kw in chunk:
+                    result[kw] = 0.0
+    except Exception as e:
+        print(f"  ⚠ 구글트렌드 전체 실패: {e}")
+    return result
+
+
+# ---------------------------------------------------------
+# 5. 네이버+구글 통합 수집
 # ---------------------------------------------------------
 def fetch_and_update():
     now_ts  = int(time.time())
     now_kst = datetime.now(KST)
 
     print(f"\n{'─'*52}")
-    print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 34개 수집 시작")
+    print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 34개 수집 시작 (네이버+구글)")
     print(f"{'─'*52}")
 
-    headers = {
+    naver_headers = {
         "X-Naver-Client-Id":     "0G9LeMqi2n9OQTmH0ueC",
         "X-Naver-Client-Secret": "6tgdSvlfjA"
     }
 
-    # Firebase에서 전체 trends 한번에 읽기 (개별 ref.get() 34번 → 1번으로 줄임)
     all_trends = db.reference('chart_data/trends').get() or {}
     updates_db = {}
+
+    # 구글 트렌드 34개 한번에 수집
+    print(f"  🔍 구글 트렌드 수집 중...")
+    google_keywords  = list(SEARCH_MAPPING.values())
+    google_scores    = fetch_google_trends(google_keywords)
+    google_baseline  = db.reference('chart_data/google_baseline').get() or {}
+    google_updates   = {}
 
     success, fail = 0, 0
 
     for ticker in TICKER_KEYS:
         try:
-            query = urllib.parse.quote(SEARCH_MAPPING[ticker])
+            search_query = SEARCH_MAPPING[ticker]
+            data         = all_trends.get(ticker, {})
+            baseline     = data.get('baseline', 0)
+
+            # 네이버 블로그 수집
+            query = urllib.parse.quote(search_query)
             url   = f"https://openapi.naver.com/v1/search/blog.json?query={query}&display=1&sort=date"
-            resp  = requests.get(url, headers=headers, timeout=5)
+            resp  = requests.get(url, headers=naver_headers, timeout=5)
 
             if resp.status_code != 200:
-                print(f" ❌ {ticker.ljust(10)} API 에러: {resp.status_code}")
+                print(f" ❌ {ticker.ljust(10)} 네이버 에러: {resp.status_code}")
                 fail += 1
                 continue
 
-            current_score = float(resp.json().get('total', 0))
-            data          = all_trends.get(ticker, {})
-            baseline      = data.get('baseline', 0)
+            naver_score = float(resp.json().get('total', 0))
+            g_current   = google_scores.get(search_query, 0.0)
+            google_updates[search_query] = g_current
 
+            # 최초 세팅
             if baseline == 0:
                 updates_db[ticker] = {
-                    'baseline':       current_score,
-                    'last_score':     current_score,
+                    'baseline':       naver_score,
+                    'last_score':     naver_score,
                     'target_yield':   0.0,
                     'current_yield':  data.get('current_yield', 0.0),
                     'last_update_ts': now_ts
                 }
-                print(f" 🔄 {ticker.ljust(10)}: 최초 세팅 ({int(current_score):,}건)")
+                print(f" 🔄 {ticker.ljust(10)}: 최초 세팅 (네이버:{int(naver_score):,} / 구글:{g_current:.0f})")
                 success += 1
                 continue
 
-            diff = current_score - baseline
-
-            if diff == 0:
-                target_yield = random.choice([1, -1]) * random.uniform(0.004, 0.009)
-            elif diff > 0:
-                target_yield =  random.uniform(0.004, 0.007) + (diff * 0.0005)
+            # 네이버 변화량 → %
+            naver_diff = naver_score - baseline
+            if naver_diff == 0:
+                naver_yield = random.choice([1, -1]) * random.uniform(0.001, 0.0025)
+            elif naver_diff > 0:
+                naver_yield =  random.uniform(0.003, 0.008) + (naver_diff * 0.15)
             else:
-                target_yield = -random.uniform(0.004, 0.007) + (diff * 0.0005)
+                naver_yield = -random.uniform(0.003, 0.008) + (naver_diff * 0.15)
 
+            # 구글 변화량 → % (1점 = 0.5%)
+            g_baseline_val = google_baseline.get(search_query, g_current)
+            g_diff         = g_current - g_baseline_val
+            if g_diff == 0:
+                google_yield = random.choice([1, -1]) * random.uniform(0.002, 0.006)
+            elif g_diff > 0:
+                google_yield =  random.uniform(0.002, 0.006) + (g_diff * 0.005)
+            else:
+                google_yield = -random.uniform(0.002, 0.006) + (g_diff * 0.005)
+
+            # 네이버 60% + 구글 40% 가중 합산
+            target_yield = (naver_yield * 0.6) + (google_yield * 0.4)
             target_yield = float(np.clip(target_yield, -0.25, 0.25))
 
             updates_db[ticker] = {
-                'baseline':       current_score,
-                'last_score':     current_score,
+                'baseline':       naver_score,
+                'last_score':     naver_score,
                 'target_yield':   target_yield,
                 'current_yield':  data.get('current_yield', 0.0),
                 'last_update_ts': now_ts
@@ -257,7 +315,8 @@ def fetch_and_update():
 
             print(
                 f" ✅ {ticker.ljust(10)}: {target_yield * 100:>+6.2f}%"
-                f"  (전:{int(baseline):,} -> 현:{int(current_score):,} | 증감:{int(diff):+}건)"
+                f"  (N:{int(naver_diff):+}건={naver_yield*100:+.2f}%"
+                f" / G:{g_diff:+.0f}pt={google_yield*100:+.2f}%)"
             )
             success += 1
 
@@ -265,9 +324,10 @@ def fetch_and_update():
             print(f" ❌ {ticker.ljust(10)} 실패: {e}")
             fail += 1
 
-    # Firebase 업데이트 한번에 처리
     if updates_db:
         db.reference('chart_data/trends').update(updates_db)
+    if google_updates:
+        db.reference('chart_data/google_baseline').update(google_updates)
 
     print(f"{'─'*52}")
     print(f"✔ 완료: 성공 {success} / 실패 {fail}  ({int(time.time()-now_ts)}초 소요)")
