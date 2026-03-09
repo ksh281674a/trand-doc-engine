@@ -1,6 +1,6 @@
 flask
-pageviewapi
 firebase-admin
 apscheduler
 numpy
 pytz
+pageviewapi
