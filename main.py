@@ -118,19 +118,18 @@ def generate_ticks():
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                # ★ 이동량: 봉 하나가 너무 길지 않도록 max_step 조절
-                volatility = 0.00080 + abs_dist * 0.015
+                # ★ 이동량: max_step 직접 사용 (ideal_step 미사용)
+                volatility = 0.00080 + abs_dist * 0.010
+                max_step   = max(0.00015, abs_dist * 0.045)
 
                 if abs_dist < 0.002:
-                    # 수렴 근처: 작은 진동
-                    move = cur_dir * abs(np.random.normal(0, volatility * 1.8))
+                    move = cur_dir * abs(np.random.normal(0, volatility * 1.5))
                 else:
-                    base = abs(ideal_step) * random.uniform(1.2, 2.5)
-                    move = cur_dir * base + np.random.normal(0, volatility * 0.5)
+                    # max_step 기준 직접 이동 — 10분(600틱) 약 93% 수렴
+                    move = cur_dir * max_step * random.uniform(0.6, 1.0) \
+                           + np.random.normal(0, volatility * 0.3)
 
-                # ★ max_step: abs_dist * 0.006 → 600틱(10분)에 걸쳐 자연 수렴
-                max_step = max(0.00015, abs_dist * 0.045)
-                move     = float(np.clip(move, -max_step, max_step))
+                move = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
                 projected = current + move
