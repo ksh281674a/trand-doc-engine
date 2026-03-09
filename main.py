@@ -89,16 +89,14 @@ def generate_ticks():
                 if counter <= 0:
                     rand = random.random()
                     if distance > 0:
-                        # 올라가야 할 때: 70% 위, 30% 아래
-                        cur_dir = 1 if rand < 0.70 else -1
+                        cur_dir = 1 if rand < 0.65 else -1
                     elif distance < 0:
-                        # 내려가야 할 때: 70% 아래, 30% 위
-                        cur_dir = -1 if rand < 0.70 else 1
+                        cur_dir = -1 if rand < 0.65 else 1
                     else:
                         cur_dir = 1 if rand < 0.50 else -1
-                    # 방향 유지 틱 수: 주 방향이면 3~6틱, 반대면 1~3틱
+                    # 주 방향: 2~4틱, 반대 방향: 1~3틱 (더 자주 전환)
                     if (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0):
-                        counter = random.randint(3, 6)
+                        counter = random.randint(2, 4)
                     else:
                         counter = random.randint(1, 3)
                     tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
@@ -106,13 +104,12 @@ def generate_ticks():
                     tick_state[ticker]['counter'] = counter - 1
 
                 # ── 이동량 계산 ──────────────────────────────────────────
-                volatility = 0.00010 + abs(distance) * 0.004
+                volatility = 0.00020 + abs(distance) * 0.006
 
                 if abs(distance) < 0.0003:
-                    # 목표 도달: 작은 노이즈 횡보
-                    move = np.random.normal(0, volatility * 0.5)
+                    move = np.random.normal(0, volatility * 0.8)
                 else:
-                    base  = abs(ideal_step) * random.uniform(0.8, 2.0)
+                    base  = abs(ideal_step) * random.uniform(1.2, 3.0)
                     noise = np.random.normal(0, volatility)
                     move  = cur_dir * base + noise
 
