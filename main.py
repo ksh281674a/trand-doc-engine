@@ -6,7 +6,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import pytz
 import urllib.parse
-import requests  # 🌟 네이버 통신을 위한 라이브러리 유지
+import requests  # 🌟 네이버 통신을 위한 필수 라이브러리
 import firebase_admin
 from firebase_admin import credentials, db
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -16,7 +16,7 @@ app = Flask(__name__)
 KST = pytz.timezone('Asia/Seoul')
 
 # ---------------------------------------------------------
-# 1. Firebase 인증
+# 1. Firebase 인증 (기존 유지)
 # ---------------------------------------------------------
 try:
     cred_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
@@ -31,7 +31,7 @@ except Exception as e:
     print(f"❌ Firebase 인증 실패: {e}")
 
 # ---------------------------------------------------------
-# 2. 34개 종목 및 네이버 검색어 매핑 (자연스러운 키워드로 변경)
+# 2. 34개 종목 및 네이버 검색어 매핑
 # ---------------------------------------------------------
 SEARCH_MAPPING = {
     "카카오": "카카오", "인스타그램": "인스타그램", "틱톡": "틱톡", "X (트위터)": "트위터",
@@ -49,7 +49,7 @@ TICKER_KEYS = list(SEARCH_MAPPING.keys())
 ohlc_buffer = {}
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (수직 점프 방지 및 랜덤 진동 - 무조건 유지)
+# 3. 데이터 엔진 (수직 점프 방지 및 0.5~1.5s 랜덤 진동 - 유지)
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -140,13 +140,9 @@ def fetch_and_update():
 
     print(f"\n──────────────── 그룹 {group_idx} 네이버 실시간 수집 시작 ────────────────")
     
-    # 🌟 환경 변수에서 네이버 API 키 가져오기
-    naver_client_id = os.environ.get("NAVER_CLIENT_ID", "")
-    naver_client_secret = os.environ.get("NAVER_CLIENT_SECRET", "")
-    
-    if not naver_client_id:
-        print("⚠️ NAVER_CLIENT_ID 환경 변수가 설정되지 않았습니다!")
-        return
+    # 🌟 전달해주신 네이버 API 키 직접 삽입
+    naver_client_id = "0G9LeMqi2n9OQTmH0ueC"
+    naver_client_secret = "6tgdSvlfjA"
     
     headers = {
         "X-Naver-Client-Id": naver_client_id,
@@ -156,14 +152,14 @@ def fetch_and_update():
     for ticker in current_group_tickers:
         try:
             search_query = SEARCH_MAPPING[ticker]
-            # 네이버 블로그 실시간 문서 총합 요청 (뉴스로 원하시면 /news.json 으로 변경)
+            # 네이버 블로그 실시간 문서 총합 요청
             url = f"https://openapi.naver.com/v1/search/blog.json?query={urllib.parse.quote(search_query)}&display=1"
             
             response = requests.get(url, headers=headers, timeout=5)
             
             if response.status_code == 200:
                 json_data = response.json()
-                # 🌟 방금까지 네이버에 작성된 이 서비스에 대한 총 글의 개수 (실시간 반영)
+                # 🌟 실시간 전체 문서(버즈)량 추출
                 current_score = float(json_data.get('total', 0))
             else:
                 print(f" ❌ {ticker.ljust(10)} 네이버 API 에러: {response.status_code}")
@@ -176,7 +172,7 @@ def fetch_and_update():
             if baseline == 0:
                 baseline = current_score
             
-            # 🌟 네이버는 단위가 크기 때문에 수익률이 안 튀게 보정 (가중치 0.001)
+            # 네이버 데이터 특성에 맞춰 가중치(0.001) 적용
             target_yield = round((current_score - baseline) * 0.001 + random.uniform(-0.0005, 0.0005), 5)
             
             ref.update({
