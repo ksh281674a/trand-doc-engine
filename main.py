@@ -117,19 +117,23 @@ def generate_ticks():
                 convergence_strength = 1.0 + ((600 - remaining_sec) / 600) * 2.0
                 ideal_step = (distance / remaining_sec) * convergence_strength
 
+                # 단일 틱 최대 이동량: 전체 distance의 3% 또는 0.0015 중 작은 값
+                # → 긴 봉 방지
+                tick_cap = min(0.0015, abs(distance) * 0.03)
+                tick_cap = max(tick_cap, 0.0002)  # 최소 이동 보장
+
                 if abs(distance) < 0.0003:
-                    move = np.random.normal(0, 0.0003)
+                    move = np.random.normal(0, 0.0002)
                 else:
-                    base = abs(ideal_step) * random.uniform(1.8, 3.5)
-                    move = cur_dir * base
+                    move = cur_dir * tick_cap * random.uniform(0.5, 1.0)
 
+                # 반대 방향은 절반으로 더 제한
                 if cur_dir != (1 if distance >= 0 else -1):
-                    max_counter_move = max(0.0005, abs(distance) * 0.20)
-                    move = float(np.clip(move, -max_counter_move, max_counter_move))
-                else:
-                    max_step = max(0.0008, abs(distance) * 0.45)
-                    move = float(np.clip(move, -max_step, max_step))
+                    move = move * 0.5
 
+                move = float(np.clip(move, -tick_cap, tick_cap))
+
+                # target 절대 초과 금지
                 projected = current + move
                 if distance > 0 and projected > target:
                     move = target - current
@@ -383,31 +387,37 @@ if __name__ == "__main__":
     def next_minute_mark(dt):
         return (dt + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
+    def next_10min_boundary(dt):
+        """다음 10분 정각: :00, :10, :20, :30, :40, :50"""
+        next_10 = ((dt.minute // 10) + 1) * 10
+        if next_10 >= 60:
+            return (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        return dt.replace(minute=next_10, second=0, microsecond=0)
+
     first_sync  = next_minute_mark(now)
     second_sync = next_minute_mark(first_sync)
 
     print(f"[1] 첫 수집 예정:    {first_sync.strftime('%H:%M:%S')}")
     print(f"[2] 두번째 수집 예정: {second_sync.strftime('%H:%M:%S')}")
 
-    def schedule_next_fetch(run_date):
-        """10분 뒤 fetch 예약 (재귀적으로 반복)"""
+    def schedule_next_fetch():
+        """다음 10분 정각에 fetch 예약"""
         def fetch_and_reschedule():
             fetch_and_update()
-            next_run = datetime.now(KST) + timedelta(minutes=10)
-            print(f"[다음 수집 예정] {next_run.strftime('%H:%M:%S')}")
-            schedule_next_fetch(next_run)
+            schedule_next_fetch()
+        next_run = next_10min_boundary(datetime.now(KST))
+        print(f"[다음 수집 예정] {next_run.strftime('%H:%M:%S')}")
         scheduler.add_job(
             fetch_and_reschedule, 'date',
-            run_date=run_date,
-            max_instances=1, id=f'fetch_{int(run_date.timestamp())}',
+            run_date=next_run,
+            max_instances=1,
+            id=f'fetch_{int(next_run.timestamp())}',
             misfire_grace_time=60
         )
 
     def second_fetch_then_schedule():
         fetch_and_update()
-        third_sync = datetime.now(KST) + timedelta(minutes=10)
-        print(f"[3~] 이후 10분 간격: {third_sync.strftime('%H:%M:%S')} 부터")
-        schedule_next_fetch(third_sync)
+        schedule_next_fetch()
 
     scheduler.add_job(fetch_and_update,           'date', run_date=first_sync,  max_instances=1)
     scheduler.add_job(second_fetch_then_schedule, 'date', run_date=second_sync, max_instances=1)
