@@ -98,7 +98,7 @@ def generate_ticks():
                 # 수렴: 10분 전체를 쓰도록 ideal_step 작게 유지
                 # 초반엔 천천히, 후반엔 조금 빠르게 (자연스러운 수렴)
                 convergence_ratio    = min(1.0, elapsed_sec / 600)
-                convergence_strength = 0.3 + convergence_ratio * 0.4   # 0.3 ~ 0.7 (느린 수렴)
+                convergence_strength = 0.08 + convergence_ratio * 0.10  # 0.08 ~ 0.18 (매우 느린 수렴)
                 ideal_step           = (distance / remaining_sec) * convergence_strength
 
                 # ★ target 0.3% 이내 = "수렴 근처" → 양봉/음봉 균형 유지
@@ -133,17 +133,17 @@ def generate_ticks():
                     tick_state[ticker]['counter'] = counter - 1
 
                 # --- 이동량 계산 ---
-                volatility = 0.00180 + abs_dist * 0.030
+                volatility = 0.00060 + abs_dist * 0.008
 
                 if near_target:
                     # 수렴 근처: 작은 랜덤 진동
-                    move = cur_dir * abs(np.random.normal(0, volatility * 2.5))
+                    move = cur_dir * abs(np.random.normal(0, volatility * 1.5))
                 else:
-                    base = abs(ideal_step) * random.uniform(0.6, 1.4)
-                    move = cur_dir * base + np.random.normal(0, volatility * 1.0)
+                    base = abs(ideal_step) * random.uniform(0.5, 1.0)
+                    move = cur_dir * base + np.random.normal(0, volatility * 0.4)
 
                 # 최대 이동폭 제한
-                max_step = max(0.0020, abs_dist * 0.15)
+                max_step = max(0.0005, abs_dist * 0.04)
                 move     = float(np.clip(move, -max_step, max_step))
 
                 # target 초과 방지
