@@ -1,9 +1,8 @@
 name: Stop Engine
 on:
   schedule:
-    - cron: '50 2 * * *'  # UTC 02:50 = KST 11:50
+    - cron: '0 15 * * *'  # UTC 15:00 = KST 00:00
   workflow_dispatch:
-
 jobs:
   stop:
     runs-on: ubuntu-latest
