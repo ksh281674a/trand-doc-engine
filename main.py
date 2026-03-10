@@ -51,11 +51,8 @@ candle_snapshot = {}   # :57초 봉 마감 스냅샷
 candle_mode     = {}   # 분봉 방향 모드: 'normal' or 'reverse' (음봉 확정)
 fetch_count     = 0    # 수집 완료 횟수
 
-TICK_INTERVAL = 0.75   # 평균 틱 간격(초)
-CANDLE_PERIOD = 600    # 수렴 주기(초) = 10분
-
 # ---------------------------------------------------------
-# 3. 틱 엔진  ★ 수정: 600초 균등 수렴
+# 3. 틱 엔진  ★ 수정: 수렴 속도 / 오르락내리락 / 일방통행 방지
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -81,18 +78,19 @@ def generate_ticks():
                         'low':  current, 'close': current
                     }
 
-                distance = target - current
-                abs_dist = abs(distance)
+                distance  = target - current
+                abs_dist  = abs(distance)
 
-                # ★ 핵심: 남은 시간 기준으로 틱당 이동량 계산 (600초 균등 수렴)
-                last_update_ts = data.get('last_update_ts', now_ts - CANDLE_PERIOD)
-                elapsed        = now_ts - last_update_ts
-                remaining      = max(1, CANDLE_PERIOD - elapsed)
+                last_update_ts = data.get('last_update_ts', now_ts - 600)
+                elapsed_sec    = now_ts - last_update_ts
+                remaining_sec  = max(5, 600 - elapsed_sec)
 
-                ideal_move = (distance / remaining) * TICK_INTERVAL
-                noise      = np.random.normal(0, abs(ideal_move) * 0.2 + 0.00005)
+                # ★ 수렴 강도: 초반 느리게, 후반 조금 빠르게 (전체 10분 사용)
+                convergence_ratio    = min(1.0, elapsed_sec / 600)
+                convergence_strength = 0.15 + convergence_ratio * 0.25   # 0.15 ~ 0.40
+                ideal_step           = (distance / remaining_sec) * convergence_strength
 
-                # 방향 결정 (candle_mode 반영)
+                # ★ 방향 결정: candle_mode로 분봉 단위 음봉 확정
                 state   = tick_state.get(ticker, {'counter': 0, 'dir': 1})
                 counter = state['counter']
                 cur_dir = state['dir']
@@ -101,15 +99,18 @@ def generate_ticks():
                 if counter <= 0:
                     rand = random.random()
 
-                    if abs_dist < 0.0005:
+                    if abs_dist < 0.002:
+                        # 수렴 근처: 50/50 진동
                         cur_dir = 1 if rand < 0.50 else -1
                         counter = random.randint(1, 2)
                     elif mode == 'reverse':
+                        # 역방향 우세(70%) 이지만 30%는 정방향으로도 갈 수 있음
                         rev_dir = -1 if distance > 0 else 1
                         cur_dir = rev_dir if rand < 0.70 else -rev_dir
                         same_rev = (cur_dir == rev_dir)
                         counter = random.randint(2, 4) if same_rev else random.randint(1, 2)
                     else:
+                        # 정방향 우세(65%) 이지만 35%는 역방향으로도 갈 수 있음
                         if distance > 0:
                             cur_dir = 1 if rand < 0.65 else -1
                         elif distance < 0:
@@ -123,13 +124,26 @@ def generate_ticks():
                 else:
                     tick_state[ticker]['counter'] = counter - 1
 
-                # cur_dir이 ideal_move 방향과 같으면 그대로, 반대면 감속
-                ideal_dir = 1 if distance >= 0 else -1
-                if cur_dir == ideal_dir:
-                    move = ideal_move + noise
-                else:
-                    move = ideal_move * 0.3 + noise  # 역방향일 땐 30%만 이동
+                # ★ 이동량: max_step 직접 사용 (ideal_step 미사용)
+                volatility = 0.00080 + abs_dist * 0.010
+                max_step   = max(0.00010, abs_dist * 0.012)
 
+                if abs_dist < 0.002:
+                    # 수렴 근처: 작은 진동 (50/50)
+                    move = cur_dir * abs(np.random.normal(0, volatility * 1.5))
+                    move = float(np.clip(move, -max_step, max_step))
+                else:
+                    # ★ 주방향/역방향 이동폭 비대칭
+                    #   주방향(수렴): abs_dist * 0.014 → 계단식 수렴
+                    #   역방향(반등): abs_dist * 0.007 → 중간 음봉/양봉 자연스럽게
+                    same_dir_move = (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0)
+                    if same_dir_move:
+                        step = abs_dist * 0.014 * random.uniform(0.7, 1.0)
+                        step = min(step, abs(distance))
+                    else:
+                        step = abs_dist * 0.007 * random.uniform(0.6, 1.0)
+                    move = cur_dir * step + np.random.normal(0, volatility * 0.2)
+                    move = float(np.clip(move, -max_step, max_step))
                 # target 초과 방지
                 projected = current + move
                 if distance > 0 and projected > target:
@@ -164,7 +178,7 @@ def generate_ticks():
 
 
 # ---------------------------------------------------------
-# 4. 봉 마감: :57초 스냅샷 → :00초 분봉 저장
+# 4. 봉 마감: :57초 스냅샷 → :00초 분봉 저장  ★ 신규
 # ---------------------------------------------------------
 def take_candle_snapshot():
     """매 분 :57초 — 현재 OHLC 스냅샷 저장"""
@@ -393,7 +407,7 @@ def initialize_app():
 
 
 # ---------------------------------------------------------
-# 8. 스케줄러  ★ 수정: 09:00~12:00 시간 체크 추가
+# 8. 스케줄러  ★ run_ticks에 09:00~12:00 시간 체크만 추가
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
@@ -401,10 +415,7 @@ def run_ticks():
     now_kst = datetime.now(KST)
     if 9 <= now_kst.hour < 12:
         generate_ticks()
-        delay = random.uniform(0.5, 1.0)
-    else:
-        delay = 30.0  # 운영시간 외: 30초마다 대기
-
+    delay    = random.uniform(0.5, 1.0)   # ★ 0.5~1.0초 랜덤
     next_run = datetime.now(KST) + timedelta(seconds=delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
 
