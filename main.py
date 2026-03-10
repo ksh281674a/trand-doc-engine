@@ -44,12 +44,12 @@ SEARCH_MAPPING = {
     "YG": "YG엔터테인먼트", "JYP": "JYP엔터테인먼트"
 }
 
-TICKER_KEYS      = list(SEARCH_MAPPING.keys())
-ohlc_buffer      = {}
-tick_state       = {}
-candle_snapshot  = {}   # :57초 봉 마감 스냅샷
-candle_mode      = {}   # 분봉 방향 모드: 'normal' or 'reverse' (음봉 확정)
-fetch_count      = 0    # 수집 완료 횟수
+TICKER_KEYS     = list(SEARCH_MAPPING.keys())
+ohlc_buffer     = {}
+tick_state      = {}
+candle_snapshot = {}   # :57초 봉 마감 스냅샷
+candle_mode     = {}   # 분봉 방향 모드: 'normal' or 'reverse' (음봉 확정)
+fetch_count     = 0    # 수집 완료 횟수
 
 # ---------------------------------------------------------
 # 3. 틱 엔진  ★ 수정: 수렴 속도 / 오르락내리락 / 일방통행 방지
@@ -233,7 +233,7 @@ def record_minute_candle():
 
 
 # ---------------------------------------------------------
-# 5. 네이버 수집  ★ 오버슈트 클램핑 수정 (갭 상승/하락 버그 해결)
+# 5. 네이버 수집  ★ 오버슈트 클램핑 추가
 # ---------------------------------------------------------
 def fetch_and_update():
     now_ts  = int(time.time())
@@ -301,10 +301,8 @@ def fetch_and_update():
                (target_yield < 0 and current_now < target_yield):
                 current_now = target_yield
                 if ticker in ohlc_buffer:
-                    # 🌟 시가(open)는 절대 덮어씌우지 않음! 종가와 꼬리만 갱신하여 갭(Gap) 버그 완벽 해결
-                    ohlc_buffer[ticker]['close'] = current_now
-                    ohlc_buffer[ticker]['high'] = max(ohlc_buffer[ticker]['high'], current_now)
-                    ohlc_buffer[ticker]['low'] = min(ohlc_buffer[ticker]['low'], current_now)
+                    for k in ('open', 'high', 'low', 'close'):
+                        ohlc_buffer[ticker][k] = current_now
 
             updates_db[f'{ticker}/baseline']       = naver_score
             updates_db[f'{ticker}/last_score']     = naver_score
