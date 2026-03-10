@@ -44,18 +44,18 @@ SEARCH_MAPPING = {
     "YG": "YG엔터테인먼트", "JYP": "JYP엔터테인먼트"
 }
 
-TICKER_KEYS   = list(SEARCH_MAPPING.keys())
-ohlc_buffer   = {}
-tick_state    = {}
-candle_snapshot = {}
-candle_mode   = {}
-fetch_count   = 0
+TICKER_KEYS     = list(SEARCH_MAPPING.keys())
+ohlc_buffer     = {}
+tick_state      = {}
+candle_snapshot = {}   # :57초 봉 마감 스냅샷
+candle_mode     = {}   # 분봉 방향 모드: 'normal' or 'reverse' (음봉 확정)
+fetch_count     = 0    # 수집 완료 횟수
 
 TICK_INTERVAL = 0.75   # 평균 틱 간격(초)
 CANDLE_PERIOD = 600    # 수렴 주기(초) = 10분
 
 # ---------------------------------------------------------
-# 3. 틱 엔진 (600초에 걸쳐 자연스럽게 수렴)
+# 3. 틱 엔진  ★ 수정: 600초 균등 수렴
 # ---------------------------------------------------------
 def generate_ticks():
     try:
@@ -84,32 +84,31 @@ def generate_ticks():
                 distance = target - current
                 abs_dist = abs(distance)
 
-                # ★ 핵심: 남은 시간 기준으로 틱당 이동량 계산
+                # ★ 핵심: 남은 시간 기준으로 틱당 이동량 계산 (600초 균등 수렴)
                 last_update_ts = data.get('last_update_ts', now_ts - CANDLE_PERIOD)
                 elapsed        = now_ts - last_update_ts
                 remaining      = max(1, CANDLE_PERIOD - elapsed)
 
-                # 600초 동안 균등하게 나눠서 이동
                 ideal_move = (distance / remaining) * TICK_INTERVAL
-
-                # 노이즈: 이동량의 ±20% 수준으로 작게
-                noise = np.random.normal(0, abs(ideal_move) * 0.2 + 0.00005)
+                noise      = np.random.normal(0, abs(ideal_move) * 0.2 + 0.00005)
 
                 # 방향 결정 (candle_mode 반영)
-                mode    = candle_mode.get(ticker, 'normal')
                 state   = tick_state.get(ticker, {'counter': 0, 'dir': 1})
                 counter = state['counter']
                 cur_dir = state['dir']
+                mode    = candle_mode.get(ticker, 'normal')
 
                 if counter <= 0:
                     rand = random.random()
+
                     if abs_dist < 0.0005:
                         cur_dir = 1 if rand < 0.50 else -1
-                        counter = random.randint(1, 3)
+                        counter = random.randint(1, 2)
                     elif mode == 'reverse':
                         rev_dir = -1 if distance > 0 else 1
                         cur_dir = rev_dir if rand < 0.70 else -rev_dir
-                        counter = random.randint(2, 5)
+                        same_rev = (cur_dir == rev_dir)
+                        counter = random.randint(2, 4) if same_rev else random.randint(1, 2)
                     else:
                         if distance > 0:
                             cur_dir = 1 if rand < 0.65 else -1
@@ -117,7 +116,8 @@ def generate_ticks():
                             cur_dir = -1 if rand < 0.65 else 1
                         else:
                             cur_dir = 1 if rand < 0.50 else -1
-                        counter = random.randint(2, 5)
+                        same_dir = (cur_dir > 0 and distance > 0) or (cur_dir < 0 and distance < 0)
+                        counter  = random.randint(2, 4) if same_dir else random.randint(1, 2)
 
                     tick_state[ticker] = {'counter': counter, 'dir': cur_dir}
                 else:
@@ -164,9 +164,10 @@ def generate_ticks():
 
 
 # ---------------------------------------------------------
-# 4. 봉 마감
+# 4. 봉 마감: :57초 스냅샷 → :00초 분봉 저장
 # ---------------------------------------------------------
 def take_candle_snapshot():
+    """매 분 :57초 — 현재 OHLC 스냅샷 저장"""
     for ticker in TICKER_KEYS:
         buf = ohlc_buffer.get(ticker)
         if buf:
@@ -177,6 +178,7 @@ def take_candle_snapshot():
 
 
 def record_minute_candle():
+    """매 분 :00초 — 스냅샷으로 분봉 저장, 새 봉은 스냅샷 close 에서 정확히 시작"""
     try:
         now_utc   = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         candle_ts = int(now_utc.timestamp()) - 60
@@ -195,12 +197,16 @@ def record_minute_candle():
                 'low':   candle['low'],  'close': close_price
             })
 
+            # 새 봉은 스냅샷 close 에서 정확히 시작
             ohlc_buffer[ticker] = {
                 'open':  close_price, 'high': close_price,
                 'low':   close_price, 'close': close_price
             }
-            tick_state[ticker]  = {'counter': 0, 'dir': 1}
+            tick_state[ticker] = {'counter': 0, 'dir': 1}
+
+            # ★ 다음 분봉 모드 결정: 30% 확률로 음봉 확정
             candle_mode[ticker] = 'reverse' if random.random() < 0.30 else 'normal'
+
             current_updates[f'{ticker}/current_yield'] = close_price
 
         candle_snapshot.clear()
@@ -213,15 +219,11 @@ def record_minute_candle():
 
 
 # ---------------------------------------------------------
-# 5. 네이버 수집
+# 5. 네이버 수집  ★ 오버슈트 클램핑 추가
 # ---------------------------------------------------------
 def fetch_and_update():
+    now_ts  = int(time.time())
     now_kst = datetime.now(KST)
-    if not (9 <= now_kst.hour < 12):
-        print(f"[{now_kst.strftime('%H:%M:%S')}] 운영 시간 외 - 수집 건너뜀")
-        return
-
-    now_ts = int(time.time())
 
     print(f"\n{'─'*52}")
     print(f"[{now_kst.strftime('%H:%M:%S')}] 34개 수집 시작")
@@ -254,6 +256,7 @@ def fetch_and_update():
             data        = all_trends.get(ticker, {})
             baseline    = data.get('baseline', 0)
 
+            # 최초 세팅
             if baseline == 0:
                 updates_db[ticker] = {
                     'baseline':       naver_score,
@@ -278,7 +281,14 @@ def fetch_and_update():
 
             target_yield = float(np.clip(target_yield, -0.30, 0.30))
 
+            # ★ 현재 위치가 새 target을 이미 넘었으면 target으로 클램핑
             current_now = ohlc_buffer.get(ticker, {}).get('close', data.get('current_yield', 0.0))
+            if (target_yield >= 0 and current_now > target_yield) or \
+               (target_yield < 0 and current_now < target_yield):
+                current_now = target_yield
+                if ticker in ohlc_buffer:
+                    for k in ('open', 'high', 'low', 'close'):
+                        ohlc_buffer[ticker][k] = current_now
 
             updates_db[f'{ticker}/baseline']       = naver_score
             updates_db[f'{ticker}/last_score']     = naver_score
@@ -303,15 +313,18 @@ def fetch_and_update():
     print(f"완료: 성공 {success} / 실패 {fail}  ({int(time.time()-now_ts)}초 소요)")
     print(f"{'─'*52}\n")
 
+    # ★ interval job 없을 때만 다음 수집 예약
     if scheduler.get_job('fetch_10min') is None:
         _schedule_next_fetch()
 
 
 def _schedule_next_fetch():
+    """1차 완료→2차 예약, 2차 완료→10분 간격 등록 (fetch_count 기반)"""
     now_kst   = datetime.now(KST)
     next_mark = (now_kst + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
     if fetch_count == 1:
+        # 1차 완료 → 2차 예약
         print(f"[→] 2차 수집 예정: {next_mark.strftime('%H:%M:%S')}")
         scheduler.add_job(
             fetch_and_update, 'date',
@@ -320,6 +333,7 @@ def _schedule_next_fetch():
             id='fetch_2nd'
         )
     elif fetch_count == 2:
+        # 2차 완료 → 10분 간격 등록
         interval_start = next_mark + timedelta(minutes=10)
         print(f"[→] 10분 간격 시작: {interval_start.strftime('%H:%M:%S')}")
         scheduler.add_job(
@@ -331,22 +345,7 @@ def _schedule_next_fetch():
 
 
 # ---------------------------------------------------------
-# 6. 엔진 중지 (12:00)
-# ---------------------------------------------------------
-def stop_engine():
-    now_kst = datetime.now(KST)
-    print(f"\n[{now_kst.strftime('%H:%M:%S')}] 12:00 엔진 중지")
-    try:
-        for job_id in ('fetch_10min', 'fetch_2nd', 'fetch_1st_daily'):
-            if scheduler.get_job(job_id):
-                scheduler.remove_job(job_id)
-    except Exception as e:
-        print(f"엔진 중지 에러: {e}")
-    print("수집 중지 완료\n")
-
-
-# ---------------------------------------------------------
-# 7. 자정 리셋
+# 6. 자정 리셋
 # ---------------------------------------------------------
 def daily_reset():
     print(f"\n[자정 리셋] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -372,32 +371,21 @@ def daily_reset():
 
 
 # ---------------------------------------------------------
-# 8. 초기화
+# 7. 초기화 (chart_history 유지, 수치만 리셋)
 # ---------------------------------------------------------
 def initialize_app():
-    print("초기화 중... (기존 값 이어받기)")
-    now_ts     = int(time.time())
-    all_trends = db.reference('chart_data/trends').get() or {}
-    updates    = {}
-
+    print("초기화 중... (chart_history 유지)")
+    now_ts  = int(time.time())
+    updates = {}
     for ticker in TICKER_KEYS:
-        data     = all_trends.get(ticker, {})
-        last_val = data.get('current_yield', 0.0)
-
         updates[ticker] = {
-            'baseline':       data.get('baseline', 0),
-            'last_score':     data.get('last_score', 0),
-            'target_yield':   last_val,
-            'current_yield':  last_val,
+            'baseline': 0, 'last_score': 0,
+            'target_yield': 0.0, 'current_yield': 0.0,
             'last_update_ts': now_ts
         }
-        ohlc_buffer[ticker] = {
-            'open': last_val, 'high': last_val,
-            'low':  last_val, 'close': last_val
-        }
-        tick_state[ticker]  = {'counter': 0, 'dir': 1}
-        candle_mode[ticker] = 'normal'
-
+        ohlc_buffer[ticker] = {'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0}
+        tick_state[ticker]   = {'counter': 0, 'dir': 1}
+        candle_mode[ticker]  = 'normal'
     db.reference('chart_data/trends').set(updates)
     db.reference('chart_data/live_data').set({})
     candle_snapshot.clear()
@@ -405,7 +393,7 @@ def initialize_app():
 
 
 # ---------------------------------------------------------
-# 9. 스케줄러
+# 8. 스케줄러  ★ 수정: 09:00~12:00 시간 체크 추가
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
@@ -415,7 +403,7 @@ def run_ticks():
         generate_ticks()
         delay = random.uniform(0.5, 1.0)
     else:
-        delay = 30.0
+        delay = 30.0  # 운영시간 외: 30초마다 대기
 
     next_run = datetime.now(KST) + timedelta(seconds=delay)
     scheduler.add_job(run_ticks, 'date', run_date=next_run)
@@ -424,16 +412,15 @@ def run_ticks():
 if __name__ == "__main__":
     initialize_app()
 
-    now = datetime.now(KST)
-    print(f"현재: {now.strftime('%H:%M:%S')}")
-    print(f"운영시간: 09:00 ~ 12:00\n")
+    now        = datetime.now(KST)
+    first_sync = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
-    # 매일 09:00 - 1차 수집 시작
-    scheduler.add_job(fetch_and_update, 'cron', hour=9, minute=0, second=0,
-                      max_instances=1, id='fetch_1st_daily')
+    print(f"현재: {now.strftime('%H:%M:%S')}  |  1차 수집: {first_sync.strftime('%H:%M:%S')}")
+    print(f"2차는 1차 완료 직후 다음 분 정각, 이후 10분 간격\n")
 
-    # 매일 12:00 - 엔진 중지
-    scheduler.add_job(stop_engine, 'cron', hour=12, minute=0, second=0)
+    # 1차 수집
+    scheduler.add_job(fetch_and_update, 'date', run_date=first_sync,
+                      max_instances=1, id='fetch_1st')
 
     # 매 분 :57초 — 봉 스냅샷
     scheduler.add_job(take_candle_snapshot, 'cron', second=57, max_instances=1)
