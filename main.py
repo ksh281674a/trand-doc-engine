@@ -407,13 +407,13 @@ def initialize_app():
 
 
 # ---------------------------------------------------------
-# 8. 스케줄러  ★ run_ticks에 09:00~12:00 시간 체크만 추가
+# 8. 스케줄러  ★ run_ticks: 09:00~24:00 시간 체크
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 def run_ticks():
     now_kst = datetime.now(KST)
-    if 9 <= now_kst.hour < 12:
+    if 9 <= now_kst.hour < 24:   # ★ 9시~자정
         generate_ticks()
     delay    = random.uniform(0.5, 1.0)   # ★ 0.5~1.0초 랜덤
     next_run = datetime.now(KST) + timedelta(seconds=delay)
