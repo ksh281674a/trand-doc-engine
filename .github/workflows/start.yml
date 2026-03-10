@@ -11,8 +11,9 @@ jobs:
       - uses: actions/checkout@v3
       - name: Install ctype CLI
         run: npm install -g @cloudtype/cli
+      - name: Login
+        run: ctype login --token ${{ secrets.CLOUDTYPE_TOKEN }}
       - name: Deploy
         run: ctype apply -f trand-doc-engine.yaml
         env:
-          CLOUDTYPE_TOKEN: ${{ secrets.CLOUDTYPE_TOKEN }}
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
