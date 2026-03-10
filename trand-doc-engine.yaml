@@ -1,5 +1,5 @@
 name: trand-doc-engine
-app: python3.12
+app: python@3.12
 options:
   start: python main.py
   env:
