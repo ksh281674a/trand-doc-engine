@@ -1,9 +1,8 @@
 name: Start Engine
 on:
   schedule:
-    - cron: '50 23 * * *'  # UTC 23:50 = KST 08:50
+    - cron: '0 0 * * *'  # UTC 00:00 = KST 09:00
   workflow_dispatch:
-
 jobs:
   start:
     runs-on: ubuntu-latest
