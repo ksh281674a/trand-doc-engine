@@ -1,0 +1,17 @@
+name: Stop Engine
+on:
+  schedule:
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install ctype CLI
+        run: npm install -g @cloudtype/cli
+      - name: Delete
+        run: ctype delete trand-doc-engine
+        env:
+          CLOUDTYPE_TOKEN: ${{ secrets.CLOUDTYPE_TOKEN }}
