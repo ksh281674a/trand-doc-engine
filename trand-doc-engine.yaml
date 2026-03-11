@@ -1,0 +1,15 @@
+name: trand-doc-engine
+app: python@3.12
+resources:
+  spot: true
+  memory: 0.5
+options:
+  start: python main.py
+  env:
+    - name: FIREBASE_SERVICE_ACCOUNT
+      secret: FIREBASE_SERVICE_ACCOUNT
+  install: pip install -r requirements.txt
+context:
+  git:
+    url: https://github.com/ksh281674a/trand-doc-engine.git
+    branch: main
