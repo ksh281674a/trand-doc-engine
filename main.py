@@ -187,11 +187,18 @@ def generate_ticks():
 # 4. 봉 마감: :57초 스냅샷 → :00초 분봉 저장  ★ 신규
 # ---------------------------------------------------------
 def take_candle_snapshot():
-    """매 분 :57초 — 틱 일시정지 (봉 마감 준비)"""
+    """매 분 :57초 — 현재 OHLC 스냅샷 저장 + 틱 일시정지"""
     global tick_paused
     if not market_open:
         return
-    tick_paused = True   # ← 틱 멈춤 (이후 3초간 가격 고정)
+    tick_paused = True   # ← 틱 멈춤
+    for ticker in TICKER_KEYS:
+        buf = ohlc_buffer.get(ticker)
+        if buf:
+            candle_snapshot[ticker] = {
+                'open': buf['open'], 'high': buf['high'],
+                'low':  buf['low'],  'close': buf['close']
+            }
 
 
 def record_minute_candle():
@@ -205,8 +212,7 @@ def record_minute_candle():
         current_updates = {}
 
         for ticker in TICKER_KEYS:
-            # 항상 ohlc_buffer 직접 사용 (snapshot 불필요, tick_paused로 고정됨)
-            candle = ohlc_buffer.get(ticker)
+            candle = candle_snapshot.get(ticker) or ohlc_buffer.get(ticker)
             if not candle:
                 continue
 
@@ -233,6 +239,8 @@ def record_minute_candle():
             candle_mode[ticker] = 'reverse' if random.random() < 0.30 else 'normal'
 
             current_updates[f'{ticker}/current_yield'] = close_price
+
+        candle_snapshot.clear()
 
         if current_updates:
             db.reference('chart_data/trends').update(current_updates)
@@ -403,7 +411,7 @@ def market_start():
 
 
 def market_close():
-    """매일 00:00 — 장 마감"""
+    """매일 12:00 — 장 마감"""
     global market_open
     print(f"\n{'='*52}")
     print(f"[장 마감] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -482,9 +490,9 @@ def run_ticks():
 
 
 def is_market_hours():
-    """현재 장 운영 시간 여부 (09:00 ~ 00:00 KST)"""
+    """현재 장 운영 시간 여부 (09:00 ~ 12:00 KST)"""
     now = datetime.now(KST)
-    return 9 <= now.hour < 24
+    return now.hour == 9 or (now.hour >= 9 and now.hour < 12) or            (now.hour == 12 and now.minute == 0 and now.second == 0)
 
 
 if __name__ == "__main__":
@@ -492,7 +500,7 @@ if __name__ == "__main__":
 
     now_kst = datetime.now(KST)
     print(f"서버 시작: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"장 운영 시간: 09:00 ~ 00:00 KST")
+    print(f"장 운영 시간: 09:00 ~ 12:00 KST")
     print()
 
     # 매 분 :57초 — 봉 스냅샷 (항상 등록, market_open 체크는 내부에서)
@@ -504,15 +512,15 @@ if __name__ == "__main__":
     # 매일 09:00 — 장 시작
     scheduler.add_job(market_start, 'cron', hour=9, minute=0, second=0)
 
-    # 매일 00:00 — 장 마감
-    scheduler.add_job(market_close, 'cron', hour=0, minute=0, second=0)
+    # 매일 12:00 — 장 마감
+    scheduler.add_job(market_close, 'cron', hour=12, minute=0, second=0)
 
     # 자정 리셋
     scheduler.add_job(daily_reset, 'cron', hour=0, minute=0, second=0)
 
     # 서버 시작 시 이미 장 시간이면 즉시 장 시작
     h, m = now_kst.hour, now_kst.minute
-    if 9 <= h < 24:
+    if 9 <= h < 12 or (h == 12 and m == 0):
         print("[서버 시작] 현재 장 시간 → 즉시 장 시작")
         market_open = True
         fetch_count = 0
