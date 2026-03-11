@@ -1,15 +1,22 @@
-name: trand-doc-engine
-app: python@3.12
-resources:
-  spot: false
-  memory: 0.25
-options:
-  start: python main.py
-  env:
-    - name: FIREBASE_SERVICE_ACCOUNT
-      secret: FIREBASE_SERVICE_ACCOUNT
-  install: pip install -r requirements.txt
-context:
-  git:
-    url: https://github.com/ksh281674a/trand-doc-engine.git
-    branch: main
+name: Start Engine
+on:
+  schedule:
+    - cron: '0 23 * * *'    # UTC 23:00 = KST 08:00
+    - cron: '30 23 * * *'   # UTC 23:30 = KST 08:30
+    - cron: '45 23 * * *'   # UTC 23:45 = KST 08:45
+    - cron: '50 23 * * *'   # UTC 23:50 = KST 08:50
+    - cron: '55 23 * * *'   # UTC 23:55 = KST 08:55
+  workflow_dispatch:
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install ctype CLI
+        run: npm install -g @cloudtype/cli
+      - name: Login
+        run: ctype login --token ${{ secrets.CLOUDTYPE_TOKEN }}
+      - name: Deploy
+        run: ctype apply -f trand-doc-engine.yaml
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
