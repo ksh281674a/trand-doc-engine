@@ -1,7 +1,11 @@
 name: Start Engine
 on:
   schedule:
-    - cron: '0 0 * * *'  # UTC 00:00 = KST 09:00
+    - cron: '0 23 * * *'    # UTC 23:00 = KST 08:00
+    - cron: '30 23 * * *'   # UTC 23:30 = KST 08:30
+    - cron: '45 23 * * *'   # UTC 23:45 = KST 08:45
+    - cron: '50 23 * * *'   # UTC 23:50 = KST 08:50
+    - cron: '55 23 * * *'   # UTC 23:55 = KST 08:55
   workflow_dispatch:
 jobs:
   start:
@@ -12,7 +16,13 @@ jobs:
         run: npm install -g @cloudtype/cli
       - name: Login
         run: ctype login --token ${{ secrets.CLOUDTYPE_TOKEN }}
-      - name: Deploy
-        run: ctype apply -f trand-doc-engine.yaml
+      - name: Deploy if not running
+        run: |
+          STATUS=$(ctype ls 2>/dev/null | grep trand-doc-engine || echo "")
+          if [ -z "$STATUS" ]; then
+            ctype apply -f trand-doc-engine.yaml
+          else
+            echo "이미 실행 중, 스킵"
+          fi
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
