@@ -16,13 +16,7 @@ jobs:
         run: npm install -g @cloudtype/cli
       - name: Login
         run: ctype login --token ${{ secrets.CLOUDTYPE_TOKEN }}
-      - name: Deploy if not running
-        run: |
-          STATUS=$(ctype ls 2>/dev/null | grep trand-doc-engine || echo "")
-          if [ -z "$STATUS" ]; then
-            ctype apply -f trand-doc-engine.yaml
-          else
-            echo "이미 실행 중, 스킵"
-          fi
+      - name: Deploy
+        run: ctype apply -f trand-doc-engine.yaml
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
