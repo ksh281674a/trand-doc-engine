@@ -2,7 +2,7 @@ name: trand-doc-engine
 app: python@3.12
 resources:
   spot: false
-  memory: 0.5
+  memory: 0.25
 options:
   start: python main.py
   env:
