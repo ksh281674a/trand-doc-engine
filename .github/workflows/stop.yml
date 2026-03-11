@@ -14,3 +14,5 @@ jobs:
         run: ctype login --token ${{ secrets.CLOUDTYPE_TOKEN }}
       - name: Delete
         run: ctype delete trand-doc-engine
+        env:
+          CLOUDTYPE_TOKEN: ${{ secrets.CLOUDTYPE_TOKEN }}
